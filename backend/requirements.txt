@@ -1,0 +1,47 @@
+# requirements.txt
+# Dépendances du backend Next-Gen DevSecOps
+#
+# Les versions sont pinnées (==) pour garantir la reproductibilité
+# des builds en CI/CD. Ne jamais utiliser >= sans limite haute en prod.
+
+# ---- Framework web -----------------------------------------
+fastapi==0.115.0
+uvicorn[standard]==0.30.6     # Serveur ASGI avec support WebSocket
+
+# ---- Validation des données --------------------------------
+pydantic==2.9.2               # Validation des inputs/outputs (intégré FastAPI)
+pydantic-settings==2.5.2      # Lecture des variables d'environnement typées
+
+# ---- LLM — Groq API ----------------------------------------
+groq==0.11.0                  # Client officiel Groq API
+
+# ---- Sécurité prompts --------------------------------------
+llm-guard==0.3.14             # Détection sémantique d'injections de prompts
+
+# ---- Rate limiting (Redis) ---------------------------------
+redis==5.1.1                  # Client Redis async
+slowapi==0.1.9                # Rate limiting middleware pour FastAPI
+
+# ---- GitHub (push automatique) ----------------------------
+PyGithub==2.4.0               # Client GitHub REST API
+
+# ---- Authentification JWT ----------------------------------
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# ---- Logging structuré -------------------------------------
+python-json-logger==2.0.7    # Logs au format JSON pour Prometheus/Grafana
+
+# ---- Monitoring --------------------------------------------
+prometheus-fastapi-instrumentator==7.0.0  # Expose /metrics automatiquement
+
+# ---- Utilitaires -------------------------------------------
+python-dotenv==1.0.1          # Chargement du .env en développement
+httpx==0.27.2                 # Client HTTP async (pour tests et appels externes)
+
+# ---- Tests --------------------------------------------------
+pytest==8.3.3
+pytest-asyncio==0.24.0        # Support async dans les tests
+pytest-cov==5.0.0             # Couverture de code
+pytest-mock==3.14.0
+httpx==0.27.2                 # Client HTTP pour tester les endpoints FastAPI

@@ -1,0 +1,53 @@
+# backend/config/rate_limits.yaml
+#
+# Configuration du rate limiting par rôle et par scope
+# Ces valeurs sont lues par backend/api/middleware.py
+#
+# POURQUOI CES LIMITES :
+#   - Un attaquant qui flood l'API avec des prompts longs épuise le quota
+#     Groq API (Couche 4 du Prompt Security Plan — Token Exhaustion)
+#   - Les limites par rôle permettent au DevOps Lead d'avoir plus de capacité
+#     qu'un Developer débutant qui teste la plateforme
+
+rate_limits:
+
+  # Limites par utilisateur (par user_id JWT)
+  per_user:
+    requests_per_minute: 5          # Max 5 générations par minute
+    max_tokens_per_request: 2000    # Longueur max d'un prompt
+    max_tokens_per_day: 50000       # Quota journalier (évite l'abus du quota Groq)
+
+  # Limites par adresse IP (pour les utilisateurs non-authentifiés)
+  per_ip:
+    requests_per_minute: 10
+    max_tokens_per_request: 500     # Plus restrictif pour les anonymes
+
+  # Limite globale (toute la plateforme)
+  global:
+    requests_per_minute: 100
+
+# Limites spécifiques par rôle (override les limites per_user)
+roles:
+  developer:
+    requests_per_minute: 5
+    max_tokens_per_day: 50000
+
+  devops_lead:
+    requests_per_minute: 15
+    max_tokens_per_day: 150000
+
+  architecte:
+    requests_per_minute: 20
+    max_tokens_per_day: 200000
+
+  admin:
+    requests_per_minute: 50
+    max_tokens_per_day: 500000
+
+# Comportement en cas de dépassement
+on_limit_exceeded:
+  http_status: 429                  # Too Many Requests
+  retry_after_seconds: 60           # Header Retry-After envoyé au client
+  log_event: true                   # Logger l'événement pour Grafana (Couche 6)
+  block_after_consecutive: 10       # Bloquer 30 min après 10 dépassements consécutifs
+  block_duration_seconds: 1800
