@@ -270,4 +270,4 @@ Voir [CONTRIBUTING.md](./CONTRIBUTING.md) pour les conventions de branches et de
 
 ---
 
-*Projet Fin de Semestre — ENSA Marrakech 2026 | Bagy Oussama | Cybersécurité & Télécommunications*
+*Projet Fin de Semestre — ENSA Marrakech 2026 | Bagy Oussama | Sayf eddine Laamri |Cybersécurité & Télécommunications*
