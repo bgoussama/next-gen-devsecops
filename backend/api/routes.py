@@ -1,62 +1,42 @@
 # backend/api/routes.py
+# VERSION COMPLÈTE — Phase 7 + Phase 8
 #
-# POURQUOI CE FICHIER EXISTE :
-#   Ce sont les routes HTTP — les "portes d'entrée" du backend.
-#   Chaque route correspond à une URL que le frontend peut appeler.
-#
-# ROUTES DÉFINIES :
-#   POST /auth/login          → connexion, retourne un JWT
-#   POST /api/v1/generate     → générer un pipeline (authentifié)
-#   GET  /api/v1/history      → voir ses pipelines générés (authentifié)
-#   GET  /api/v1/health       → état du serveur (public)
-#
-# [WHY FastAPI et pas Flask pour les routes]
-# FastAPI valide automatiquement le format des requêtes via Pydantic.
-# Si le frontend envoie {"prompt": 123} (nombre au lieu de string),
-# FastAPI retourne une erreur 422 automatiquement — sans code supplémentaire.
+# ROUTES :
+#   POST /auth/login            → connexion JWT
+#   POST /api/v1/generate       → génère 1 Jenkinsfile (Couches 1+2+3)
+#   POST /api/v1/generate/all   → génère 4 artefacts + push GitHub
+#   GET  /api/v1/history        → historique des pipelines
+#   GET  /health                → état du serveur
 
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, field_validator
 import logging
 
-from backend.security.auth import (
+from security.auth import (
     authenticate_user,
     create_access_token,
     verify_token,
     has_permission,
     TokenData,
 )
-from backend.services.pipeline_generator import generate_secure_pipeline
+from services.pipeline_generator import generate_secure_pipeline
+from services.artifact_generator import generate_all_artifacts
+from services.github_pusher import push_artifacts_to_github
 
 logger = logging.getLogger(__name__)
-
-# ----------------------------------------------------------------
-# ROUTER
-#
-# [WHY APIRouter et pas app directement]
-# APIRouter permet de grouper les routes par domaine.
-# En main.py : app.include_router(router)
-# Si demain on veut une v2 : app.include_router(router_v2, prefix="/v2")
-# ----------------------------------------------------------------
 router = APIRouter()
-security = HTTPBearer()  # Lit le token depuis le header "Authorization: Bearer <token>"
+security = HTTPBearer()
 
 
 # ----------------------------------------------------------------
-# MODÈLES PYDANTIC — Validation automatique des données
-#
-# [WHY Pydantic]
-# Pydantic valide le format des données avant que ton code les touche.
-# Si le frontend envoie {"prompt": ""} (vide), Pydantic lève une erreur
-# avant même d'appeler validate_prompt() — double protection.
+# MODÈLES PYDANTIC
 # ----------------------------------------------------------------
 
 class LoginRequest(BaseModel):
     email: str
     password: str
 
-    # [SECURITY] Empêcher les mots de passe vides
     @field_validator("password")
     @classmethod
     def password_not_empty(cls, v):
@@ -75,9 +55,6 @@ class LoginResponse(BaseModel):
 class GenerateRequest(BaseModel):
     prompt: str
 
-    # [SECURITY] Validation côté serveur — même si le frontend valide,
-    # on revalide ici. Le client-side validation c'est de l'UX,
-    # le server-side validation c'est de la sécurité.
     @field_validator("prompt")
     @classmethod
     def prompt_not_empty(cls, v):
@@ -96,36 +73,36 @@ class GenerateResponse(BaseModel):
     generation_time_ms: int = 0
 
 
+class ArtifactsResponse(BaseModel):
+    """
+    Réponse pour la génération des 4 artefacts.
+    github_branch_url : URL de la branche créée sur GitHub (vide si push échoué)
+    """
+    success: bool
+    jenkinsfile: str = ""
+    terraform: str = ""
+    dockerfile: str = ""
+    k8s_manifest: str = ""
+    error_message: str = ""
+    tokens_used: int = 0
+    github_branch_url: str = ""   # ← Phase 8 — URL de la branche GitHub
+
+
 # ----------------------------------------------------------------
-# DÉPENDANCE FastAPI — Extraction et vérification du JWT
-#
-# [WHY Depends()]
-# FastAPI injecte automatiquement cette fonction dans les routes
-# qui en ont besoin. Si le token est invalide, la route retourne
-# 401 automatiquement — sans code supplémentaire dans chaque route.
-#
-# Usage dans une route :
-#   async def ma_route(token_data: TokenData = Depends(get_current_user)):
-#       # token_data est automatiquement vérifié avant d'arriver ici
+# DÉPENDANCE JWT
 # ----------------------------------------------------------------
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> TokenData:
     """
-    Dépendance FastAPI : extrait et vérifie le JWT du header Authorization.
-
-    Le header attendu : Authorization: Bearer eyJhbGc...
-
-    [SECURITY] HTTPBearer() extrait automatiquement le token après "Bearer ".
-    On vérifie ensuite la validité avec verify_token().
+    Extrait et vérifie le JWT depuis le header Authorization.
+    Retourne TokenData ou lève une erreur 401.
     """
     token = credentials.credentials
     token_data = verify_token(token)
 
     if not token_data:
-        # [SECURITY] 401 Unauthorized — le token est invalide ou expiré
-        # On ne dit pas pourquoi exactement (expiré ? falsifié ?)
-        # pour ne pas aider un attaquant
         raise HTTPException(
             status_code=401,
             detail="Token invalide ou expiré. Reconnecte-toi.",
@@ -142,19 +119,14 @@ async def get_current_user(
 @router.post("/auth/login", response_model=LoginResponse, tags=["Auth"])
 async def login(request: LoginRequest):
     """
-    Authentification — vérifie email + password, retourne un JWT.
+    Authentification — retourne un JWT si les credentials sont valides.
 
-    Le frontend stocke ce token et l'envoie dans chaque requête suivante
-    dans le header : Authorization: Bearer <token>
-
-    [SECURITY] On ne retourne JAMAIS le mot de passe dans la réponse.
-    On retourne seulement le token, le rôle, et l'user_id.
+    [SECURITY] Message d'erreur générique pour éviter la User Enumeration.
+    On ne révèle pas si c'est l'email ou le mot de passe qui est faux.
     """
     user = authenticate_user(request.email, request.password)
 
     if not user:
-        # [SECURITY] Message générique — ne révèle pas si c'est l'email
-        # ou le mot de passe qui est faux (User Enumeration Prevention)
         raise HTTPException(
             status_code=401,
             detail="Email ou mot de passe incorrect.",
@@ -175,40 +147,31 @@ async def login(request: LoginRequest):
 
 # ----------------------------------------------------------------
 # ROUTE 2 — POST /api/v1/generate
+# Génère un Jenkinsfile avec les 3 couches de sécurité complètes
 # ----------------------------------------------------------------
 
 @router.post("/api/v1/generate", response_model=GenerateResponse, tags=["Pipeline"])
 async def generate_pipeline(
     request: GenerateRequest,
-    token_data: TokenData = Depends(get_current_user),  # JWT obligatoire
+    token_data: TokenData = Depends(get_current_user),
 ):
     """
-    Génère un pipeline CI/CD à partir d'un prompt en langage naturel.
+    Génère un Jenkinsfile sécurisé depuis un prompt.
 
-    Flux :
-    1. FastAPI vérifie le JWT via Depends(get_current_user)
-    2. On vérifie que le rôle a la permission "generate_pipeline"
-    3. On appelle pipeline_generator.generate_secure_pipeline()
-       qui orchestre les 3 couches de sécurité
-    4. On retourne le résultat
-
-    [SECURITY] La route est protégée par deux niveaux :
-    - Authentification : token JWT valide obligatoire
-    - Autorisation : rôle avec permission "generate_pipeline"
+    Flux complet :
+    Couche 1 → validate_prompt() — regex injection
+    Couche 2 → groq_client()     — system prompt hardened
+    Couche 3 → validate_output() — scan réponse LLM
+    Couche 4 → RBAC + JWT        — vérification rôle
     """
-    # Vérification RBAC
     if not has_permission(token_data.role, "generate_pipeline"):
         raise HTTPException(
             status_code=403,
-            detail=f"Ton rôle '{token_data.role.value}' n'a pas accès à cette fonctionnalité.",
+            detail=f"Rôle '{token_data.role.value}' non autorisé.",
         )
 
-    logger.info(
-        f"Generate request | user_id={token_data.user_id} | "
-        f"role={token_data.role.value}"
-    )
+    logger.info(f"Generate | user={token_data.user_id} | role={token_data.role.value}")
 
-    # Appel de l'orchestrateur (Couches 1 + 2 + 3)
     result = generate_secure_pipeline(
         user_prompt=request.prompt,
         user_id=token_data.user_id,
@@ -224,7 +187,100 @@ async def generate_pipeline(
 
 
 # ----------------------------------------------------------------
-# ROUTE 3 — GET /api/v1/history
+# ROUTE 3 — POST /api/v1/generate/all
+# Génère les 4 artefacts + push automatique sur GitHub
+# ----------------------------------------------------------------
+
+@router.post("/api/v1/generate/all", response_model=ArtifactsResponse, tags=["Pipeline"])
+async def generate_all(
+    request: GenerateRequest,
+    token_data: TokenData = Depends(get_current_user),
+):
+    """
+    Génère les 4 artefacts DevSecOps et les pousse sur GitHub.
+
+    Flux :
+    1. Vérification RBAC (Couche 4)
+    2. Validation du prompt (Couche 1)
+    3. Génération des 4 artefacts via Groq (Couche 2)
+    4. Push automatique sur GitHub dans une branche dédiée (Phase 8)
+    5. Retour des artefacts + URL GitHub au frontend
+
+    [WHY on ne bloque pas si GitHub échoue]
+    Les artefacts ont été générés avec succès.
+    Un problème GitHub (token expiré, réseau) ne doit pas empêcher
+    l'utilisateur de voir et télécharger ses fichiers.
+    On log l'erreur mais on retourne quand même les artefacts.
+    """
+    # Couche 4 — RBAC
+    if not has_permission(token_data.role, "generate_pipeline"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Rôle '{token_data.role.value}' non autorisé.",
+        )
+
+    # Couche 1 — Validation du prompt
+    from security.prompt_guard import validate_prompt
+    validation = validate_prompt(request.prompt)
+    if not validation.is_valid:
+        logger.warning(
+            f"Prompt rejected | user={token_data.user_id} | "
+            f"reason={validation.reason} | score={validation.risk_score}"
+        )
+        return ArtifactsResponse(
+            success=False,
+            error_message=validation.reason,
+        )
+
+    logger.info(f"Generate all | user={token_data.user_id} | role={token_data.role.value}")
+
+    # Couche 2 — Génération des 4 artefacts via Groq
+    result = generate_all_artifacts(request.prompt)
+
+    if not result.success:
+        logger.error(f"Generation failed | user={token_data.user_id} | {result.error_message}")
+        return ArtifactsResponse(
+            success=False,
+            error_message=result.error_message,
+        )
+
+    # Phase 8 — Push automatique sur GitHub
+    # [WHY après la vérification de succès]
+    # On ne pousse sur GitHub que si la génération a réussi.
+    # Inutile de créer une branche vide.
+    push_result = push_artifacts_to_github(
+        jenkinsfile=result.jenkinsfile,
+        terraform=result.terraform,
+        dockerfile=result.dockerfile,
+        k8s_manifest=result.k8s_manifest,
+        user_id=token_data.user_id,
+        prompt_summary=request.prompt[:80],
+    )
+
+    if push_result.success:
+        logger.info(
+            f"GitHub push success | branch={push_result.branch_name} | "
+            f"files={push_result.files_pushed}"
+        )
+    else:
+        logger.warning(
+            f"GitHub push failed (non-blocking) | "
+            f"user={token_data.user_id} | error={push_result.error_message}"
+        )
+
+    return ArtifactsResponse(
+        success=True,
+        jenkinsfile=result.jenkinsfile,
+        terraform=result.terraform,
+        dockerfile=result.dockerfile,
+        k8s_manifest=result.k8s_manifest,
+        tokens_used=result.tokens_used,
+        github_branch_url=push_result.branch_url if push_result.success else "",
+    )
+
+
+# ----------------------------------------------------------------
+# ROUTE 4 — GET /api/v1/history
 # ----------------------------------------------------------------
 
 @router.get("/api/v1/history", tags=["Pipeline"])
@@ -233,33 +289,27 @@ async def get_history(
 ):
     """
     Retourne l'historique des pipelines générés.
-
-    Pour l'instant retourne une liste vide — sera connecté
-    à une base de données en Phase suivante.
-
-    [SECURITY] Chaque utilisateur ne voit que SES propres pipelines,
-    sauf le devops_lead et admin qui ont "view_all_history".
+    Liste vide pour l'instant — base de données en Phase suivante.
     """
     if not has_permission(token_data.role, "view_history"):
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
-    # TODO Phase suivante : récupérer depuis la DB filtrée par user_id
     return {
         "user_id": token_data.user_id,
         "role": token_data.role.value,
-        "pipelines": [],  # sera rempli quand on connecte une DB
+        "pipelines": [],
     }
 
 
 # ----------------------------------------------------------------
-# ROUTE 4 — GET /health (publique — pas de JWT requis)
+# ROUTE 5 — GET /health (publique)
 # ----------------------------------------------------------------
 
 @router.get("/health", tags=["Monitoring"])
 async def health():
     """
-    Endpoint de santé étendu.
-    Utilisé par Docker, Prometheus, et Jenkins pour vérifier l'état.
+    Endpoint de santé — public, pas de JWT requis.
+    Utilisé par Docker, Prometheus, Jenkins pour vérifier l'état.
     """
     return {
         "status": "healthy",

@@ -153,4 +153,4 @@ class TestRBAC:
     def test_all_roles_can_generate_pipeline(self):
         # Tous les rôles doivent pouvoir générer un pipeline
         for role in UserRole:
-            assert has_permission(role, "generate_pipeline") is True
+            assert has_permission(role, "generate_pipeline") is True 
