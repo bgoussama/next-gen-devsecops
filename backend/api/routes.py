@@ -11,6 +11,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, field_validator
+from typing import Any
 import logging
 
 from security.auth import (
@@ -23,6 +24,8 @@ from security.auth import (
 from services.pipeline_generator import generate_secure_pipeline
 from services.artifact_generator import generate_all_artifacts
 from services.github_pusher import push_artifacts_to_github
+from services.report_store import save_report, get_all_reports
+from utils.history_manager import save_to_history, get_user_history
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -86,6 +89,23 @@ class ArtifactsResponse(BaseModel):
     error_message: str = ""
     tokens_used: int = 0
     github_branch_url: str = ""   # ← Phase 8 — URL de la branche GitHub
+
+
+class PipelineReportRequest(BaseModel):
+    branch: str
+    build_number: Any
+    status: str
+    duration_ms: int | float = 0
+    timestamp: str | None = None
+    sonarqube_url: str | None = None
+    github_branch_url: str | None = None
+
+    @field_validator("status")
+    @classmethod
+    def status_allowed(cls, v):
+        if v not in {"SUCCESS", "FAILURE"}:
+            raise ValueError("Le statut doit etre SUCCESS ou FAILURE")
+        return v
 
 
 # ----------------------------------------------------------------
@@ -175,6 +195,16 @@ async def generate_pipeline(
     result = generate_secure_pipeline(
         user_prompt=request.prompt,
         user_id=token_data.user_id,
+    )
+
+    # [NEW] Sauvegarde historique pour Monitoring (Phase 7)
+    save_to_history(
+        user_id=token_data.user_id,
+        prompt=request.prompt,
+        status="success" if result.success else "error",
+        tokens_used=result.tokens_used,
+        type="Jenkinsfile",
+        error_message=result.error_message
     )
 
     return GenerateResponse(
@@ -268,6 +298,16 @@ async def generate_all(
             f"user={token_data.user_id} | error={push_result.error_message}"
         )
 
+    # [NEW] Sauvegarde historique pour Monitoring (Phase 7)
+    save_to_history(
+        user_id=token_data.user_id,
+        prompt=request.prompt,
+        status="success",
+        tokens_used=result.tokens_used,
+        type="Full Stack (4 artefacts)",
+        error_message=""
+    )
+
     return ArtifactsResponse(
         success=True,
         jenkinsfile=result.jenkinsfile,
@@ -280,7 +320,37 @@ async def generate_all(
 
 
 # ----------------------------------------------------------------
-# ROUTE 4 — GET /api/v1/history
+# ROUTE 4 — POST /api/v1/pipeline/report (publique Jenkins)
+# ----------------------------------------------------------------
+
+@router.post("/api/v1/pipeline/report", tags=["Pipeline"])
+async def receive_pipeline_report(request: PipelineReportRequest):
+    """
+    Recoit un rapport Jenkins sans JWT.
+    Jenkins appelle cette route depuis le stage Deploy Report.
+    """
+    report = save_report(request.model_dump(exclude_none=True))
+    logger.info(
+        f"Jenkins report saved | id={report['id']} | "
+        f"branch={report['branch']} | status={report['status']}"
+    )
+    return {"success": True, "id": report["id"]}
+
+
+# ----------------------------------------------------------------
+# ROUTE 5 — GET /api/v1/pipeline/reports (JWT requis)
+# ----------------------------------------------------------------
+
+@router.get("/api/v1/pipeline/reports", tags=["Pipeline"])
+async def list_pipeline_reports(
+    token_data: TokenData = Depends(get_current_user),
+):
+    """Retourne tous les rapports Jenkins, du plus recent au plus ancien."""
+    return {"reports": get_all_reports()}
+
+
+# ----------------------------------------------------------------
+# ROUTE 6 — GET /api/v1/history
 # ----------------------------------------------------------------
 
 @router.get("/api/v1/history", tags=["Pipeline"])
@@ -289,20 +359,22 @@ async def get_history(
 ):
     """
     Retourne l'historique des pipelines générés.
-    Liste vide pour l'instant — base de données en Phase suivante.
+    Lecture depuis le fichier JSON local (Phase 7).
     """
     if not has_permission(token_data.role, "view_history"):
         raise HTTPException(status_code=403, detail="Accès refusé.")
 
+    pipelines = get_user_history(token_data.user_id, token_data.role.value)
+
     return {
         "user_id": token_data.user_id,
         "role": token_data.role.value,
-        "pipelines": [],
+        "pipelines": pipelines,
     }
 
 
 # ----------------------------------------------------------------
-# ROUTE 5 — GET /health (publique)
+# ROUTE 7 — GET /health (publique)
 # ----------------------------------------------------------------
 
 @router.get("/health", tags=["Monitoring"])

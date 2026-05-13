@@ -110,3 +110,8 @@ monitoring/prometheus/data/
 # ============================================================
 jenkins/workspace/
 jenkins/.jenkins/
+
+.claude/
+frontend/.vite/
+backend/data/
+Next-Gen-DevSecOps/

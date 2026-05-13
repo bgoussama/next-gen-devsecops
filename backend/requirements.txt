@@ -33,7 +33,7 @@ passlib[bcrypt]==1.7.4
 python-json-logger==2.0.7    # Logs au format JSON pour Prometheus/Grafana
 
 # ---- Monitoring --------------------------------------------
-prometheus-fastapi-instrumentator==7.0.0  # Expose /metrics automatiquement
+prometheus-fastapi-instrumentator==6.1.0  # Expose /metrics automatiquement
 
 # ---- Utilitaires -------------------------------------------
 python-dotenv==1.0.1          # Chargement du .env en développement

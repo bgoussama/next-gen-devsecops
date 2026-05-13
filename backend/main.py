@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pathlib import Path
+from prometheus_fastapi_instrumentator import Instrumentator
 import logging
 import os
 
@@ -23,6 +24,8 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+Instrumentator().instrument(app).expose(app)
 
 # ---- Monter les routes ----
 from api.routes import router

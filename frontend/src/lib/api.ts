@@ -147,6 +147,17 @@ export async function apiGetHistory() {
   return data
 }
 
+export async function apiGetPipelineReports() {
+  const response = await authFetch(`${BASE_URL}/api/v1/pipeline/reports`)
+  const data = await response.json()
+
+  if (!response.ok) {
+    throw new Error(data.detail || 'Erreur lors du chargement des rapports Jenkins')
+  }
+
+  return data
+}
+
 // ----------------------------------------------------------------
 // HEALTH CHECK — État du backend
 // Public — pas de JWT requis

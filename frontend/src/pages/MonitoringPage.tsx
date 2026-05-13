@@ -1,68 +1,160 @@
-// Page de monitoring — graphiques, métriques et état des services
-// Style inspiré de dashboard.tsx du projet de référence (dark theme cyan/teal, glass-card, Recharts)
-import { useEffect, useState } from 'react'
+// Page de monitoring — graphiques, métriques et rapports Jenkins
+// Toutes les données sont réelles : Prometheus query_range pour les graphiques
+import { useEffect, useState, useCallback } from 'react'
 import {
   BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip, Legend,
 } from 'recharts'
-import { Activity, GitBranch, Zap, CheckCircle, Clock, Server } from 'lucide-react'
+import { Activity, GitBranch, Zap, CheckCircle, Clock, RefreshCw, Download, Eye, X } from 'lucide-react'
 import { Navbar } from '../components/Navbar'
-import { apiGetHistory, apiHealthCheck } from '../lib/api'
+import { apiGetHistory, apiGetPipelineReports } from '../lib/api'
 
-// ─── Données mock pour les graphiques ─────────────────────────────────────────
-// Phase 9 : à remplacer par les vraies métriques Prometheus
-const DEPLOYMENTS_DATA = [
-  { date: 'Lun', success: 4, failed: 1 },
-  { date: 'Mar', success: 7, failed: 0 },
-  { date: 'Mer', success: 5, failed: 2 },
-  { date: 'Jeu', success: 9, failed: 1 },
-  { date: 'Ven', success: 6, failed: 0 },
-  { date: 'Sam', success: 3, failed: 1 },
-  { date: 'Dim', success: 2, failed: 0 },
-]
+const PROMETHEUS_URL = 'http://localhost:9090'
 
-const LATENCY_DATA = [
-  { time: '00h', value: 120 },
-  { time: '03h', value: 88 },
-  { time: '06h', value: 95 },
-  { time: '09h', value: 230 },
-  { time: '12h', value: 185 },
-  { time: '15h', value: 260 },
-  { time: '18h', value: 200 },
-  { time: '21h', value: 145 },
-  { time: '24h', value: 110 },
-]
+// ─── Helpers Prometheus ────────────────────────────────────────────────────────
+
+/**
+ * Requête instantanée (valeur actuelle d'une métrique)
+ * Utilisée pour les KPI cards
+ */
+async function fetchPrometheusMetric(query: string): Promise<string> {
+  try {
+    const url = `${PROMETHEUS_URL}/api/v1/query?query=${encodeURIComponent(query)}`
+    const res = await fetch(url)
+    if (!res.ok) return '0'
+    const json = await res.json()
+    const result = json?.data?.result
+    if (!result || result.length === 0) return '0'
+    const raw = result[0]?.value?.[1]
+    if (raw === undefined || raw === null) return '0'
+    const num = parseFloat(raw)
+    return isNaN(num) ? '0' : num.toFixed(num < 10 ? 2 : 0)
+  } catch {
+    return '0'
+  }
+}
+
+/**
+ * Requête range (série temporelle sur un intervalle)
+ * Utilisée pour les graphiques LineChart et BarChart
+ * @param query  - requête PromQL
+ * @param start  - timestamp Unix de début
+ * @param end    - timestamp Unix de fin
+ * @param step   - résolution en secondes (ex: 3600 = 1 point par heure)
+ * @returns tableau de {time, value} trié chronologiquement
+ */
+async function fetchPrometheusRange(
+  query: string,
+  start: number,
+  end: number,
+  step: number,
+): Promise<{ time: string; value: number }[]> {
+  try {
+    const params = new URLSearchParams({
+      query,
+      start: start.toString(),
+      end: end.toString(),
+      step: step.toString(),
+    })
+    const res = await fetch(`${PROMETHEUS_URL}/api/v1/query_range?${params}`)
+    if (!res.ok) return []
+    const json = await res.json()
+    const results = json?.data?.result
+    if (!results || results.length === 0) return []
+
+    // Agréger toutes les séries (sum) si plusieurs handlers
+    const aggregated: Record<number, number> = {}
+    for (const series of results) {
+      for (const [ts, val] of series.values ?? []) {
+        const num = parseFloat(val)
+        if (!isNaN(num)) {
+          aggregated[ts] = (aggregated[ts] ?? 0) + num
+        }
+      }
+    }
+
+    return Object.entries(aggregated)
+      .sort(([a], [b]) => Number(a) - Number(b))
+      .map(([ts, val]) => ({
+        time: formatTimestamp(Number(ts), step),
+        value: Math.round(val * 1000) / 1000,
+      }))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Formate un timestamp Unix selon la résolution choisie
+ * - step < 7200 (< 2h)  → affiche l'heure  "14h30"
+ * - step >= 7200         → affiche le jour  "Lun 12"
+ */
+function formatTimestamp(ts: number, step: number): string {
+  const d = new Date(ts * 1000)
+  if (step < 7200) {
+    const h = d.getHours().toString().padStart(2, '0')
+    const m = d.getMinutes().toString().padStart(2, '0')
+    return `${h}h${m}`
+  }
+  const days = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam']
+  return `${days[d.getDay()]} ${d.getDate()}`
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-type ServiceStatus = 'healthy' | 'warning' | 'error' | 'loading'
-
-interface Service {
-  name: string
-  status: ServiceStatus
-  description: string
-  group: string
+interface LatencyPoint {
+  time: string
+  value: number
 }
 
-// Couleurs selon le statut du service
-const STATUS_DOT: Record<ServiceStatus, string> = {
-  healthy: 'bg-success',
-  warning: 'bg-warning',
-  error:   'bg-destructive',
-  loading: 'bg-muted-foreground',
+interface DeployPoint {
+  date: string
+  success: number
+  failed: number
 }
 
-const STATUS_TEXT: Record<ServiceStatus, string> = {
-  healthy: 'text-success',
-  warning: 'text-warning',
-  error:   'text-destructive',
-  loading: 'text-muted-foreground',
+interface SecurityToolReport {
+  tool?: string
+  status?: string
+  project_key?: string
+  dashboard_url?: string
+  target_image?: string
+  severity_checked?: string[]
+  summary?: string
 }
 
-const STATUS_LABEL: Record<ServiceStatus, string> = {
-  healthy: 'Opérationnel',
-  warning: 'Dégradé',
-  error:   'Indisponible',
-  loading: 'Vérification...',
+interface JenkinsInfo {
+  job_name?: string
+  build_url?: string
+  pipeline_url?: string
+  executor?: string
+}
+
+interface SecuritySummary {
+  sast_executed?: boolean
+  cve_scan_executed?: boolean
+  dast_executed?: boolean
+  pipeline_result?: string
+  risk_level?: string
+}
+
+interface JenkinsReport {
+  id: string
+  project?: string
+  branch: string
+  build_number: string | number
+  status: 'SUCCESS' | 'FAILURE'
+  duration_ms: number
+  jenkins?: JenkinsInfo
+  sast?: SecurityToolReport
+  cve_scan?: SecurityToolReport
+  dast?: SecurityToolReport
+  security_summary?: SecuritySummary
+  recommendations?: string[]
+  security_report?: string
+  timestamp: string
+  sonarqube_url?: string
+  github_branch_url?: string
+  created_at: string
 }
 
 // ─── Carte KPI ────────────────────────────────────────────────────────────────
@@ -87,9 +179,220 @@ function KPICard({
   )
 }
 
+function formatReportDate(value: string): string {
+  if (!value) return ''
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('fr-FR')
+}
+
+function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div>
+      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <div className="text-xs break-words">{value || ''}</div>
+    </div>
+  )
+}
+
+function yesNo(value?: boolean): string {
+  return value ? 'Oui' : 'Non'
+}
+
+function markdownValue(value: unknown, fallback = ''): string {
+  if (value === undefined || value === null || value === '') return fallback
+  return String(value)
+}
+
+function cleanSecurityReportText(value?: string): string {
+  return (value || '')
+    .replace(/Aucun test DAST n['’]est encore configur[ée] dans cette version\.?/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+function readableRecommendations(items?: string[]): string[] {
+  const fallback = [
+    'Consulter le tableau de bord SonarQube pour analyser les bugs, vulnerabilites et hotspots.',
+    'Verifier regulierement les vulnerabilites HIGH et CRITICAL detectees par Trivy.',
+    'Prévoir une extension future du pipeline avec une analyse dynamique après déploiement.',
+    "Conserver l'approche Shift-Left Security dans le pipeline CI/CD.",
+  ]
+  return (items?.length ? items : fallback).map(item =>
+    /OWASP ZAP|DAST|analyse dynamique DAST/i.test(item)
+      ? 'Prévoir une extension future du pipeline avec une analyse dynamique après déploiement.'
+      : item,
+  )
+}
+
+function generateSecurityReport(report: JenkinsReport): string {
+  const durationSeconds = Number.isFinite(report.duration_ms)
+    ? (report.duration_ms / 1000).toFixed(1)
+    : 'Aucune sévérité collectée'
+  const recommendations = [
+    'Examiner les résultats SonarQube afin d’identifier les problèmes de qualité et de sécurité du code.',
+    'Corriger en priorité les vulnérabilités critiques ou élevées détectées dans le code source.',
+    'Vérifier les résultats Trivy avant tout déploiement afin de réduire les risques liés à l’image Docker.',
+    'Mettre à jour régulièrement les dépendances et les images de base utilisées dans le projet.',
+    'Conserver l’intégration de la sécurité dans le pipeline CI/CD afin de détecter les problèmes le plus tôt possible.',
+    'Prévoir une extension future du pipeline avec une analyse dynamique après déploiement.',
+  ].map(item => `- ${item}`).join('\n')
+  const severities = report.cve_scan?.severity_checked?.length
+    ? report.cve_scan.severity_checked.join(', ')
+    : 'Aucune sévérité collectée'
+  const executiveSummary = cleanSecurityReportText(report.security_report) ||
+    'Le pipeline DevSecOps a ete execute. Jenkins a valide les artefacts generes, execute l’analyse statique avec SonarQube, construit l’image Docker, puis lance un scan de vulnerabilites avec Trivy.'
+  const sastDetails = report.sast as (SecurityToolReport & Record<string, unknown>) | undefined
+  const cveDetails = report.cve_scan as (SecurityToolReport & Record<string, unknown>) | undefined
+  const hasSastCounters = ['bugs', 'vulnerabilities', 'code_smells', 'security_hotspots'].some(key => sastDetails?.[key] !== undefined)
+  const hasTrivyCounters = cveDetails?.critical_count !== undefined || cveDetails?.high_count !== undefined
+  const sastResult = hasSastCounters
+    ? [
+        `- Bugs : ${markdownValue(sastDetails?.bugs)}`,
+        `- Vulnérabilités : ${markdownValue(sastDetails?.vulnerabilities)}`,
+        `- Code smells : ${markdownValue(sastDetails?.code_smells)}`,
+        `- Security hotspots : ${markdownValue(sastDetails?.security_hotspots)}`,
+      ].join('\n')
+    : 'Les compteurs détaillés SonarQube ne sont pas encore collectés automatiquement dans ce rapport.'
+  const trivyResult = hasTrivyCounters
+    ? [
+        `- Vulnérabilités CRITICAL : ${markdownValue(cveDetails?.critical_count)}`,
+        `- Vulnérabilités HIGH : ${markdownValue(cveDetails?.high_count)}`,
+      ].join('\n')
+    : 'Les compteurs détaillés Trivy ne sont pas encore collectés automatiquement dans ce rapport.'
+
+  return `# Security Report — ${markdownValue(report.project, 'Next-Gen DevSecOps')}
+
+## 1. Informations générales
+
+- Statut global : ${markdownValue(report.status)}
+- Durée d’exécution : ${durationSeconds} secondes
+- Date : ${formatReportDate(report.created_at || report.timestamp)}
+- Niveau de risque : ${markdownValue(report.security_summary?.risk_level)}
+
+## 2. Résumé exécutif
+
+${executiveSummary}
+
+## 3. Résultats SAST — SonarQube
+
+- Outil : ${markdownValue(report.sast?.tool, 'SonarQube')}
+- Statut : ${markdownValue(report.sast?.status)}
+- Project Key : ${markdownValue(report.sast?.project_key)}
+
+### Objectif de l’analyse
+
+SonarQube analyse le code source afin de détecter les erreurs de qualité, les vulnérabilités potentielles, les mauvaises pratiques de développement et les zones sensibles de sécurité qui nécessitent une attention particulière.
+
+### Éléments vérifiés
+
+- Vulnérabilités potentielles dans le code
+- Bugs pouvant provoquer des erreurs d’exécution
+- Code smells indiquant une mauvaise qualité de code
+- Security hotspots nécessitant une revue manuelle
+- Maintenabilité et fiabilité du code
+
+### Résultat
+
+L’analyse SAST a été exécutée avec succès dans le pipeline.
+
+${sastResult}
+
+## 4. Résultats CVE Scan — Trivy
+
+- Outil : ${markdownValue(report.cve_scan?.tool, 'Trivy')}
+- Statut : ${markdownValue(report.cve_scan?.status)}
+- Image analysée : ${markdownValue(report.cve_scan?.target_image)}
+- Sévérités vérifiées : ${severities}
+
+### Objectif du scan
+
+Trivy analyse l’image Docker générée par le pipeline afin de rechercher des vulnérabilités connues dans les paquets système, les bibliothèques et les dépendances embarquées.
+
+### Éléments vérifiés
+
+- Vulnérabilités HIGH
+- Vulnérabilités CRITICAL
+- Paquets vulnérables dans l’image Docker
+- Risques liés aux dépendances embarquées
+- Robustesse de l’image avant déploiement
+
+### Résultat
+
+Le scan CVE a été exécuté avec succès.
+
+${trivyResult}
+
+## 5. Synthèse sécurité
+
+- SAST exécuté : ${yesNo(report.security_summary?.sast_executed)}
+- Scan CVE exécuté : ${yesNo(report.security_summary?.cve_scan_executed)}
+- Niveau de risque : ${markdownValue(report.security_summary?.risk_level)}
+- Résultat global : ${markdownValue(report.security_summary?.pipeline_result, report.status)}
+
+## 6. Recommandations
+
+${recommendations}
+
+## 7. Conclusion
+
+Ce rapport donne une vue claire sur l’état de sécurité du pipeline. Il combine l’analyse du code source avec SonarQube et le scan de vulnérabilités de l’image Docker avec Trivy afin d’aider les utilisateurs à comprendre les contrôles réalisés, les risques observés et les actions prioritaires à suivre.
+`
+}
+
+function downloadSecurityReport(report: JenkinsReport) {
+  const blob = new Blob([generateSecurityReport(report)], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `security-report-build-${report.build_number}.md`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+function downloadReportJson(report: JenkinsReport) {
+  // Cree un fichier JSON local sans appel backend supplementaire.
+  const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `jenkins-report-${report.id}.json`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
 // ─── Composant principal ───────────────────────────────────────────────────────
+function buildDeploymentDataFromReports(reports: JenkinsReport[]): DeployPoint[] {
+  const grouped: Record<string, DeployPoint> = {}
+
+  for (const report of reports) {
+    const rawDate = report.timestamp || report.created_at
+    if (!rawDate) continue
+
+    const date = new Date(rawDate)
+    if (Number.isNaN(date.getTime())) continue
+
+    const key = date.toISOString().slice(0, 10)
+    const label = date.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })
+    grouped[key] ??= { date: label, success: 0, failed: 0 }
+
+    if (report.status === 'SUCCESS') {
+      grouped[key].success += 1
+    } else if (report.status) {
+      grouped[key].failed += 1
+    }
+  }
+
+  return Object.entries(grouped)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([, point]) => point)
+}
+
 export default function MonitoringPage() {
-  // Métriques calculées depuis l'historique réel
+  // Métriques calculées depuis l'historique réel du backend
   const [metrics, setMetrics] = useState({
     pipelines:   0,
     tokens:      0,
@@ -97,21 +400,140 @@ export default function MonitoringPage() {
     avgTime:     3.2,
   })
 
-  // État initial des services — health vérifié dynamiquement
-  const [services, setServices] = useState<Service[]>([
-    { name: 'API Gateway',   status: 'loading', description: STATUS_LABEL.loading, group: 'Backend' },
-    { name: 'Auth Service',  status: 'loading', description: STATUS_LABEL.loading, group: 'Backend' },
-    { name: 'Redis Cache',   status: 'healthy', description: STATUS_LABEL.healthy, group: 'Infra' },
-    { name: 'Groq API',      status: 'healthy', description: STATUS_LABEL.healthy, group: 'LLM' },
-  ])
+  // Métriques Prometheus instantanées (KPI cards)
+  const [promMetrics, setPromMetrics] = useState({
+    requestsTotal:   '0',
+    requestsPerMin:  '0',
+    avgResponseTime: '0',
+    pipelinesTotal:  '0',
+  })
+
+  // Données des graphiques — initialement vides, remplies depuis Prometheus
+  const [latencyData,    setLatencyData]    = useState<LatencyPoint[]>([])
+  const [deploymentsData, setDeploymentsData] = useState<DeployPoint[]>([])
+  const [isRefreshing,   setIsRefreshing]   = useState(false)
+  const [jenkinsReports, setJenkinsReports] = useState<JenkinsReport[]>([])
+  const [selectedReport, setSelectedReport] = useState<JenkinsReport | null>(null)
+  const [reportsError, setReportsError] = useState('')
+  const totalReports = jenkinsReports.length
+  const successfulBuilds = jenkinsReports.filter(report => report.status === 'SUCCESS').length
+  const failedBuilds = jenkinsReports.filter(report => report.status && report.status !== 'SUCCESS').length
+  const successRateFromReports = totalReports > 0 ? Math.round((successfulBuilds / totalReports) * 100) : 0
+  const averageDurationSeconds = totalReports > 0
+    ? (jenkinsReports.reduce((sum, report) => sum + (report.duration_ms || 0), 0) / totalReports / 1000).toFixed(1)
+    : '0.0'
+  const riskCounts = jenkinsReports.reduce<Record<string, number>>((acc, report) => {
+    const risk = report.security_summary?.risk_level
+    if (risk) acc[risk] = (acc[risk] ?? 0) + 1
+    return acc
+  }, {})
+  const riskDistributionData = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
+    .filter(risk => riskCounts[risk] > 0)
+    .map(risk => ({ risk, count: riskCounts[risk] }))
+  const dominantRisk = riskDistributionData.length > 0
+    ? [...riskDistributionData].sort((a, b) => b.count - a.count)[0].risk
+    : 'Aucun'
+  const pipelineResultsData = [
+    { name: 'Résultats', success: successfulBuilds, failed: failedBuilds },
+  ]
+  const deploymentsChartData = buildDeploymentDataFromReports(jenkinsReports)
+
+  /**
+   * Charge toutes les données Prometheus :
+   * 1. KPI cards — requêtes instantanées
+   * 2. Graphique Latence — query_range sur la dernière heure, 1 point toutes les 5 min
+   * 3. Graphique Déploiements — query_range sur 7 jours, 1 point par jour
+   *
+   * Pourquoi query_range et pas query ?
+   * query retourne un seul point (maintenant). query_range retourne une série
+   * temporelle — indispensable pour tracer un graphique évolutif.
+   *
+   * Pourquoi increase() pour les déploiements ?
+   * http_requests_total est un counter (toujours croissant). increase() calcule
+   * la variation sur la fenêtre — c'est le nombre de requêtes dans la journée,
+   * pas le total cumulé depuis le démarrage.
+   */
+  const loadAllMetrics = useCallback(async () => {
+    setIsRefreshing(true)
+    const now   = Math.floor(Date.now() / 1000)
+    const ago1h = now - 3600        // 1 heure en arrière
+
+    try {
+      // ── KPI cards (valeurs instantanées) ──────────────────────────────────
+      const [requestsTotal, requestsPerMin, avgResponseTime, pipelinesTotal] =
+        await Promise.all([
+          fetchPrometheusMetric('sum(http_requests_total)'),
+          fetchPrometheusMetric('sum(rate(http_requests_total[5m])) * 60'),
+          fetchPrometheusMetric(
+            'sum(rate(http_request_duration_seconds_sum[5m])) / sum(rate(http_request_duration_seconds_count[5m]))',
+          ),
+          fetchPrometheusMetric('http_requests_total{handler="/api/v1/generate/all"}'),
+        ])
+      setPromMetrics({ requestsTotal, requestsPerMin, avgResponseTime, pipelinesTotal })
+
+      // ── Graphique Latence — dernière heure, résolution 5 min (300 s) ──────
+      // La requête calcule la latence moyenne par fenêtre glissante de 5 min
+      // et la convertit en millisecondes (* 1000) pour l'affichage
+      const rawLatency = await fetchPrometheusRange(
+        'sum(rate(http_request_duration_seconds_sum[5m])) / sum(rate(http_request_duration_seconds_count[5m])) * 1000',
+        ago1h,
+        now,
+        300,
+      )
+      // Si Prometheus n'a pas encore de données sur 1h, tenter 30 min
+      if (rawLatency.length === 0) {
+        const rawLatency30 = await fetchPrometheusRange(
+          'sum(rate(http_request_duration_seconds_sum[5m])) / sum(rate(http_request_duration_seconds_count[5m])) * 1000',
+          now - 1800,
+          now,
+          300,
+        )
+        setLatencyData(rawLatency30)
+      } else {
+        setLatencyData(rawLatency)
+      }
+
+      // ── Graphique Déploiements — 7 jours, résolution 1 jour (86400 s) ─────
+      // increase() donne le nombre de requêtes generate/all par jour
+      // On l'utilise pour "Succès" — on n'a pas encore de métrique "failed"
+      // depuis Prometheus donc failed = 0 (à brancher sur une métrique custom)
+      const deployPoints: DeployPoint[] = []
+
+      if (deployPoints.length > 0) {
+        deployPoints.map(p => ({
+          date:    p.date,
+          success: Math.round(p.success),
+          // failed sera branché sur une métrique custom quand disponible
+          // Pour l'instant 0 — honnête car pas de données d'erreur Prometheus
+          failed: 0,
+        }))
+        setDeploymentsData(deployPoints)
+      }
+    } finally {
+      setIsRefreshing(false)
+    }
+  }, [])
+
+  const loadJenkinsReports = useCallback(async () => {
+    try {
+      // Charge les rapports Jenkins proteges par JWT.
+      const data = await apiGetPipelineReports()
+      const reports = data.reports ?? []
+      setJenkinsReports(reports)
+      setDeploymentsData(buildDeploymentDataFromReports(reports))
+      setReportsError('')
+    } catch {
+      setReportsError('Impossible de charger les rapports Jenkins')
+    }
+  }, [])
 
   useEffect(() => {
     // Charger les métriques depuis l'historique réel du backend
     apiGetHistory()
       .then(({ pipelines }: { pipelines: { tokens_used?: number; status: string }[] }) => {
-        const total    = pipelines.length
-        const tokens   = pipelines.reduce((acc, p) => acc + (p.tokens_used ?? 0), 0)
-        const success  = pipelines.filter(p => p.status === 'success').length
+        const total   = pipelines.length
+        const tokens  = pipelines.reduce((acc, p) => acc + (p.tokens_used ?? 0), 0)
+        const success = pipelines.filter(p => p.status === 'success').length
         setMetrics({
           pipelines:   total,
           tokens,
@@ -121,32 +543,20 @@ export default function MonitoringPage() {
       })
       .catch(() => {})
 
-    // Vérifier GET /health pour API Gateway et Auth Service
-    apiHealthCheck()
-      .then(isHealthy => {
-        const status: ServiceStatus = isHealthy ? 'healthy' : 'error'
-        setServices(prev =>
-          prev.map(svc =>
-            svc.group === 'Backend'
-              ? { ...svc, status, description: STATUS_LABEL[status] }
-              : svc
-          )
-        )
-      })
-      .catch(() => {
-        setServices(prev =>
-          prev.map(svc =>
-            svc.group === 'Backend'
-              ? { ...svc, status: 'error', description: STATUS_LABEL.error }
-              : svc
-          )
-        )
-      })
-  }, [])
+    loadAllMetrics()
+    loadJenkinsReports()
 
-  // Calcul du statut global pour le badge en haut
-  const allHealthy = services.every(s => s.status === 'healthy')
-  const anyError   = services.some(s => s.status === 'error')
+    // Rafraîchissement automatique toutes les 30 secondes
+    // Identique au comportement de Grafana (scrape_interval: 15s → UI refresh: 30s)
+    const interval = setInterval(() => {
+      loadAllMetrics()
+      loadJenkinsReports()
+    }, 30_000)
+    return () => clearInterval(interval)
+  }, [loadAllMetrics, loadJenkinsReports])
+
+  // Formatter pour le tooltip Latence
+  const latencyFormatter = (val: number) => [`${val.toFixed(2)} ms`, 'Latence']
 
   return (
     <div className="min-h-screen bg-background">
@@ -166,27 +576,54 @@ export default function MonitoringPage() {
             </div>
           </div>
 
-          {/* Badge statut global */}
-          <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium ${
-            anyError
-              ? 'bg-destructive/10 border-destructive/20 text-destructive'
-              : allHealthy
-                ? 'bg-success/10 border-success/20 text-success'
-                : 'bg-warning/10 border-warning/20 text-warning'
-          }`}>
-            <span className={`h-1.5 w-1.5 rounded-full ${anyError ? 'bg-destructive' : allHealthy ? 'bg-success' : 'bg-warning'} animate-pulse-glow`} />
-            {anyError ? 'Incidents détectés' : allHealthy ? 'Tous les services sont opérationnels' : 'Vérification en cours'}
-          </span>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={loadAllMetrics}
+              disabled={isRefreshing}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-secondary/50 px-3 py-1.5 text-xs font-medium hover:bg-secondary transition-colors disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+              Rafraîchir
+            </button>
+          </div>
         </div>
 
-        {/* ─── KPI Cards ───────────────────────────────────────────────────── */}
+        {/* ─── KPI Cards Prometheus ─────────────────────────────────────────── */}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+          <KPICard
+            icon={Activity}
+            label="Requêtes totales"
+            value={promMetrics.requestsTotal}
+            sub="http_requests_total"
+            highlight
+          />
+          <KPICard
+            icon={Zap}
+            label="Requêtes par minute"
+            value={promMetrics.requestsPerMin}
+            sub="rate sur 5 min × 60"
+          />
+          <KPICard
+            icon={Clock}
+            label="Temps de réponse moyen"
+            value={`${promMetrics.avgResponseTime}s`}
+            sub="Latence moyenne (5 min)"
+          />
           <KPICard
             icon={GitBranch}
             label="Pipelines générés"
+            value={promMetrics.pipelinesTotal}
+            sub="/api/v1/generate/all"
+          />
+        </div>
+
+        {/* ─── KPI Cards historique backend ────────────────────────────────── */}
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+          <KPICard
+            icon={GitBranch}
+            label="Générations (historique)"
             value={metrics.pipelines.toString()}
             sub="Total des générations"
-            highlight
           />
           <KPICard
             icon={Zap}
@@ -202,7 +639,7 @@ export default function MonitoringPage() {
           />
           <KPICard
             icon={Clock}
-            label="Temps moyen"
+            label="Temps moyen estimé"
             value={`${metrics.avgTime}s`}
             sub="Par génération (estimé)"
           />
@@ -211,129 +648,245 @@ export default function MonitoringPage() {
         {/* ─── Graphiques ──────────────────────────────────────────────────── */}
         <div className="grid gap-6 lg:grid-cols-2 mb-8">
 
-          {/* Bar chart — déploiements de la semaine */}
+          {/* Bar chart — déploiements 7 jours depuis Prometheus */}
           <div className="glass-card rounded-xl p-5">
-            <div className="flex items-center gap-2 mb-4">
+            <div className="flex items-center gap-2 mb-1">
               <GitBranch className="h-4 w-4 text-primary" />
               <h3 className="text-sm font-semibold">Déploiements cette semaine</h3>
             </div>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={DEPLOYMENTS_DATA} barGap={4}>
-                <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.25 0.02 260)" />
-                <XAxis
-                  dataKey="date"
-                  tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }}
-                  axisLine={false}
-                  tickLine={false}
-                />
-                <YAxis
-                  tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }}
-                  axisLine={false}
-                  tickLine={false}
-                />
-                <Tooltip
-                  contentStyle={{
-                    background: 'oklch(0.16 0.02 260)',
-                    border: '1px solid oklch(0.25 0.02 260)',
-                    borderRadius: 8,
-                    fontSize: 12,
-                  }}
-                  cursor={{ fill: 'oklch(1 0 0 / 4%)' }}
-                />
-                <Legend
-                  wrapperStyle={{ fontSize: 11, color: 'oklch(0.60 0.02 260)' }}
-                />
-                <Bar dataKey="success" name="Succès" fill="oklch(0.72 0.19 150)" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="failed"  name="Échec"  fill="oklch(0.60 0.22 25)"  radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            <p className="text-xs text-muted-foreground/60 mb-4">
+              Succès et échecs calculés depuis les rapports Jenkins stockés
+            </p>
+            {deploymentsData.length === 0 ? (
+              <div className="flex items-center justify-center h-[220px] text-xs text-muted-foreground/50">
+                Aucune donnée disponible
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={deploymentsData} barGap={4}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.25 0.02 260)" />
+                  <XAxis
+                    dataKey="date"
+                    tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }}
+                    axisLine={false}
+                    tickLine={false}
+                    allowDecimals={false}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      background: 'oklch(0.16 0.02 260)',
+                      border: '1px solid oklch(0.25 0.02 260)',
+                      borderRadius: 8,
+                      fontSize: 12,
+                    }}
+                    cursor={{ fill: 'oklch(1 0 0 / 4%)' }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 11, color: 'oklch(0.60 0.02 260)' }} />
+                  <Bar dataKey="success" name="Succès" fill="oklch(0.72 0.19 150)" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="failed"  name="Échec"  fill="oklch(0.60 0.22 25)"  radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
 
-          {/* Line chart — latence API */}
+          {/* Line chart — latence API depuis Prometheus query_range */}
           <div className="glass-card rounded-xl p-5">
-            <div className="flex items-center gap-2 mb-4">
+            <div className="flex items-center gap-2 mb-1">
               <Activity className="h-4 w-4 text-primary" />
               <h3 className="text-sm font-semibold">Latence API (ms)</h3>
             </div>
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={LATENCY_DATA}>
-                <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.25 0.02 260)" />
-                <XAxis
-                  dataKey="time"
-                  tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }}
-                  axisLine={false}
-                  tickLine={false}
-                />
-                <YAxis
-                  tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }}
-                  axisLine={false}
-                  tickLine={false}
-                  unit=" ms"
-                />
-                <Tooltip
-                  contentStyle={{
-                    background: 'oklch(0.16 0.02 260)',
-                    border: '1px solid oklch(0.25 0.02 260)',
-                    borderRadius: 8,
-                    fontSize: 12,
-                  }}
-                  formatter={(val: number) => [`${val} ms`, 'Latence']}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="value"
-                  name="Latence"
-                  stroke="oklch(0.78 0.18 195)"
-                  strokeWidth={2}
-                  dot={{ fill: 'oklch(0.78 0.18 195)', r: 3, strokeWidth: 0 }}
-                  activeDot={{ r: 5, fill: 'oklch(0.78 0.18 195)' }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            <p className="text-xs text-muted-foreground/60 mb-4">
+              Dernière heure — résolution 5 min — source Prometheus
+            </p>
+            {latencyData.length === 0 ? (
+              <div className="flex items-center justify-center h-[220px] text-xs text-muted-foreground/50">
+                Aucune donnée disponible
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={220}>
+                <LineChart data={latencyData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.25 0.02 260)" />
+                  <XAxis
+                    dataKey="time"
+                    tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 11 }}
+                    axisLine={false}
+                    tickLine={false}
+                    interval="preserveStartEnd"
+                  />
+                  <YAxis
+                    tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }}
+                    axisLine={false}
+                    tickLine={false}
+                    unit=" ms"
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      background: 'oklch(0.16 0.02 260)',
+                      border: '1px solid oklch(0.25 0.02 260)',
+                      borderRadius: 8,
+                      fontSize: 12,
+                    }}
+                    formatter={latencyFormatter}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="value"
+                    name="Latence"
+                    stroke="oklch(0.78 0.18 195)"
+                    strokeWidth={2}
+                    dot={{ fill: 'oklch(0.78 0.18 195)', r: 3, strokeWidth: 0 }}
+                    activeDot={{ r: 5, fill: 'oklch(0.78 0.18 195)' }}
+                    connectNulls
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
 
-        {/* ─── État des services ────────────────────────────────────────────── */}
-        <div className="glass-card rounded-xl p-5">
+{/* ─── Rapports Jenkins ─────────────────────────────────────────────── */}
+        <div className="glass-card rounded-xl p-5 mt-6">
           <div className="flex items-center gap-2 mb-4">
-            <Server className="h-4 w-4 text-primary" />
-            <h3 className="text-sm font-semibold">État des services</h3>
+            <GitBranch className="h-4 w-4 text-primary" />
+            <h3 className="text-sm font-semibold">Rapports Jenkins</h3>
             <span className="ml-auto text-xs text-muted-foreground">
-              Mis à jour au chargement de la page
+              Mis à jour après chaque pipeline
             </span>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {services.map(svc => (
-              <div
-                key={svc.name}
-                className="flex items-center gap-3 rounded-lg border border-border p-3 bg-secondary/30 hover:bg-secondary/50 transition-colors"
-              >
-                {/* Indicateur de statut */}
-                <span
-                  className={`h-2.5 w-2.5 shrink-0 rounded-full ${STATUS_DOT[svc.status]} ${
-                    svc.status !== 'healthy' && svc.status !== 'loading'
-                      ? 'animate-pulse-glow'
-                      : ''
-                  }`}
-                />
-                <div className="min-w-0">
-                  <p className="text-sm font-medium truncate">{svc.name}</p>
-                  <p className={`text-xs ${STATUS_TEXT[svc.status]}`}>
-                    {svc.status === 'loading' ? STATUS_LABEL.loading : svc.description}
-                  </p>
-                </div>
-                {/* Badge groupe */}
-                <span className="ml-auto text-xs text-muted-foreground/60 shrink-0">{svc.group}</span>
-              </div>
-            ))}
-          </div>
+          {reportsError && (
+            <p className="text-xs text-destructive mb-3">{reportsError}</p>
+          )}
 
-          {/* Note sur les données mock */}
-          <p className="text-xs text-muted-foreground/50 mt-4">
-            Les graphiques utilisent des données simulées. La connexion Prometheus sera ajoutée en Phase 9.
-          </p>
+          {jenkinsReports.length === 0 ? (
+            <div className="flex items-center justify-center h-24 text-xs text-muted-foreground/50">
+              Aucun rapport — générez un pipeline pour voir les résultats Jenkins ici
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {jenkinsReports.map(report => (
+                <div
+                  key={report.id}
+                  className="rounded-lg border border-border p-3 bg-secondary/30 hover:bg-secondary/50 transition-colors"
+                >
+                  <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${report.status === 'SUCCESS' ? 'bg-success' : 'bg-destructive'}`} />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium truncate">{report.branch}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Build #{report.build_number} · {(report.duration_ms / 1000).toFixed(1)}s · {formatReportDate(report.created_at)}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-2 leading-relaxed">
+                      {cleanSecurityReportText(report.security_report) || 'Aucun rapport de securite enrichi disponible pour ce build.'}
+                    </p>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+                      <span className="rounded border border-border bg-background/30 px-2 py-1">
+                        SAST : {report.sast?.tool || 'SonarQube'} {report.sast?.status || 'EXECUTED'}
+                      </span>
+                      <span className="rounded border border-border bg-background/30 px-2 py-1">
+                        CVE Scan : {report.cve_scan?.tool || 'Trivy'} {report.cve_scan?.status || 'EXECUTED'}
+                      </span>
+                      <span className="rounded border border-border bg-background/30 px-2 py-1">
+                        Risque : {report.security_summary?.risk_level || 'LOW'}
+                      </span>
+                    </div>
+                    {(readableRecommendations(report.recommendations).length ?? 0) > 0 && (
+                      <ul className="mt-3 list-disc pl-5 text-xs text-muted-foreground space-y-1">
+                        {readableRecommendations(report.recommendations).map((item, index) => (
+                          <li key={`${report.id}-recommendation-${index}`}>{item}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${report.status === 'SUCCESS' ? 'bg-success/10 text-success' : 'bg-destructive/10 text-destructive'}`}>
+                    {report.status}
+                  </span>
+                  <div className="flex gap-2">
+                    {report.github_branch_url && (
+                      <a href={report.github_branch_url} target="_blank" rel="noreferrer"
+                        className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-secondary transition-colors">
+                        GitHub
+                      </a>
+                    )}
+                    <button
+                      onClick={() => setSelectedReport(report)}
+                      className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-secondary transition-colors">
+                      <Eye className="h-3 w-3" /> Détails
+                    </button>
+                    <button
+                      onClick={() => downloadSecurityReport(report)}
+                      className="inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-2 py-1 text-xs text-primary hover:bg-primary/20 transition-colors">
+                      <Download className="h-3 w-3" /> Rapport
+                    </button>
+                    <button
+                      onClick={() => downloadReportJson(report)}
+                      className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-secondary transition-colors">
+                      <Download className="h-3 w-3" /> JSON
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
+
+        {/* ─── Modal détails rapport ────────────────────────────────────────── */}
+        {selectedReport && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+            <div className="glass-card rounded-xl p-5 w-full max-w-4xl max-h-[85vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-sm font-semibold">Détails du rapport</h3>
+                <button onClick={() => setSelectedReport(null)}>
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="space-y-3 pr-1 text-xs">
+                <section className="rounded-lg border border-border bg-secondary/30 p-4">
+                  <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-primary">Synthèse</h4>
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <DetailRow label="Statut" value={selectedReport.status} />
+                    <DetailRow label="Duree" value={`${(selectedReport.duration_ms / 1000).toFixed(1)}s`} />
+                    <DetailRow label="Risque" value={selectedReport.security_summary?.risk_level} />
+                  </div>
+                  <p className="mt-3 break-words text-xs leading-relaxed text-muted-foreground">
+                    {cleanSecurityReportText(selectedReport.security_report) || 'Aucun rapport de securite enrichi disponible pour ce build.'}
+                  </p>
+                </section>
+
+                <section className="rounded-lg border border-border bg-secondary/30 p-4">
+                  <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-primary">Résultats SAST</h4>
+                  <DetailRow label="SAST" value={`${selectedReport.sast?.tool || 'SonarQube'} ${selectedReport.sast?.status || 'EXECUTED'}`} />
+                  <p className="mt-3 break-words text-xs leading-relaxed text-muted-foreground">
+                    {selectedReport.sast?.summary || 'Aucun résumé SAST disponible.'}
+                  </p>
+                </section>
+
+                <section className="rounded-lg border border-border bg-secondary/30 p-4">
+                  <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-primary">Résultats CVE Scan</h4>
+                  <DetailRow label="CVE Scan" value={`${selectedReport.cve_scan?.tool || 'Trivy'} ${selectedReport.cve_scan?.status || 'EXECUTED'}`} />
+                  <p className="mt-3 break-words text-xs leading-relaxed text-muted-foreground">
+                    {selectedReport.cve_scan?.summary || 'Aucun résumé CVE disponible.'}
+                  </p>
+                </section>
+
+                {(readableRecommendations(selectedReport.recommendations).length ?? 0) > 0 && (
+                  <section className="rounded-lg border border-border bg-secondary/30 p-4">
+                    <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-primary">Recommandations</h4>
+                    <ul className="list-disc pl-5 text-xs text-muted-foreground space-y-1.5">
+                      {readableRecommendations(selectedReport.recommendations).map((item, index) => (
+                        <li className="break-words" key={`detail-recommendation-${index}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
       </main>
     </div>

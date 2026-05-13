@@ -1,0 +1,28 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+
+  # Backend FastAPI — métriques HTTP (requêtes, temps de réponse, etc.)
+  - job_name: 'nextgen-backend'
+    static_configs:
+      - targets: ['host.docker.internal:8000']
+    metrics_path: '/metrics'
+
+  # Jenkins — métriques CI/CD (builds, durée, succès/échec)
+  # Nécessite le plugin Prometheus Metrics dans Jenkins
+  # et un token API Jenkins pour l'authentification
+  - job_name: 'jenkins'
+    metrics_path: '/prometheus'
+    static_configs:
+      - targets: ['host.docker.internal:8080']
+    basic_auth:
+      username: 'admin'
+      password: '11752122549e832ebb20b6213efc664e6f'
+
+  # SonarQube — métriques qualité code (optionnel)
+  - job_name: 'sonarqube'
+    static_configs:
+      - targets: ['host.docker.internal:9000']
+    metrics_path: '/api/monitoring/metrics'
