@@ -29,9 +29,20 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from security.prompt_guard import validate_prompt
-from security.output_validator import validate_output
-from services.groq_client import generate_pipeline as call_groq
+try:
+    from security.prompt_guard import validate_prompt
+except ModuleNotFoundError:
+    from backend.security.prompt_guard import validate_prompt
+
+try:
+    from security.output_validator import validate_output
+except ModuleNotFoundError:
+    from backend.security.output_validator import validate_output
+
+try:
+    from services.groq_client import generate_pipeline as call_groq
+except ModuleNotFoundError:
+    from backend.services.groq_client import generate_pipeline as call_groq
 
 logger = logging.getLogger(__name__)
 
