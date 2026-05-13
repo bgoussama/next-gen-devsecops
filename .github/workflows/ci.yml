@@ -40,7 +40,8 @@ jobs:
         # On installe seulement ce dont les tests ont besoin
         # pas toutes les dépendances lourdes (fastapi, llm-guard, etc.)
         run: |
-          pip install pytest pytest-cov groq
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt
 
       - name: Run backend tests
         run: |
