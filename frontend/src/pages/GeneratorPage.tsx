@@ -4,7 +4,7 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bot, Sparkles, Loader2, Terminal, ChevronRight, GitBranch } from 'lucide-react'
+import { Bot, Sparkles, Loader2, Terminal, ChevronRight, GitBranch, ShieldCheck } from 'lucide-react'
 import { Navbar } from '../components/Navbar'
 import { apiGenerateAll } from '../lib/api'
 
@@ -24,6 +24,20 @@ interface LogLine {
   type: 'info' | 'success' | 'error' | 'system'
 }
 
+interface ThreatTechnique {
+  id: string
+  name: string
+  status: 'PROTECTED' | 'AT_RISK' | 'UNKNOWN'
+  description: string
+  evidence: string
+}
+
+interface ThreatSnapshot {
+  score: number
+  riskLevel: string
+  techniques: ThreatTechnique[]
+}
+
 const LOG_COLORS: Record<string, string> = {
   info:    'text-cyan-300',
   success: 'text-green-400',
@@ -35,6 +49,18 @@ function delay(ms: number) {
   return new Promise<void>(r => setTimeout(r, ms))
 }
 
+function scoreBadgeClass(score: number) {
+  if (score > 80) return 'border-success/30 bg-success/10 text-success'
+  if (score >= 60) return 'border-warning/30 bg-warning/10 text-warning'
+  return 'border-destructive/30 bg-destructive/10 text-destructive'
+}
+
+function techniqueStatusClass(status: ThreatTechnique['status']) {
+  if (status === 'PROTECTED') return 'text-success'
+  if (status === 'AT_RISK') return 'text-destructive'
+  return 'text-warning'
+}
+
 // ─── Composant principal ───────────────────────────────────────────────────────
 export default function GeneratorPage() {
   const navigate = useNavigate()
@@ -43,6 +69,7 @@ export default function GeneratorPage() {
   const [logs, setLogs]           = useState<LogLine[]>([])
   const [success, setSuccess]     = useState(false)
   const [githubUrl, setGithubUrl] = useState('')
+  const [threat, setThreat]       = useState<ThreatSnapshot | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
   const logId  = useRef(0)
 
@@ -62,6 +89,7 @@ export default function GeneratorPage() {
     setLogs([])
     setSuccess(false)
     setGithubUrl('')
+    setThreat(null)
 
     // ── Logs visibles par l'utilisateur — simples et professionnels ──
     // Aucune mention de Groq, des couches de sécurité ou de l'architecture interne
@@ -91,6 +119,14 @@ export default function GeneratorPage() {
         setGithubUrl(data.github_branch_url)
       }
 
+      const threatSnapshot: ThreatSnapshot = {
+        score: data.threat_score || 0,
+        riskLevel: data.threat_risk_level || 'UNKNOWN',
+        techniques: data.threat_techniques || [],
+      }
+      setThreat(threatSnapshot)
+      addLog(`[OK] Score MITRE ATT&CK : ${threatSnapshot.score}/100 (${threatSnapshot.riskLevel})`, 'success')
+
       addLog('[OK] Prêt — cliquez sur "Voir dans l\'éditeur"', 'success')
 
       // ── Stocker les 4 artefacts dans localStorage pour l'éditeur ──
@@ -103,6 +139,11 @@ export default function GeneratorPage() {
         k8s_manifest:      data.k8s_manifest       || '',
         tokens_used:       data.tokens_used        || 0,
         github_branch_url: data.github_branch_url  || '',
+        threat_score:      data.threat_score       || 0,
+        threat_risk_level: data.threat_risk_level  || '',
+        threat_techniques: data.threat_techniques  || [],
+        threat_recommendations: data.threat_recommendations || [],
+        threat_summary:    data.threat_summary     || '',
         created_at:        new Date().toISOString(),
       }
       localStorage.setItem('lastGeneration', JSON.stringify(generation))
@@ -162,7 +203,7 @@ export default function GeneratorPage() {
             {TEMPLATES.map(t => (
               <button
                 key={t.label}
-                onClick={() => { setPrompt(t.prompt); setSuccess(false) }}
+                onClick={() => { setPrompt(t.prompt); setSuccess(false); setThreat(null) }}
                 className="rounded-lg border border-border bg-secondary px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors"
               >
                 {t.label}
@@ -175,7 +216,7 @@ export default function GeneratorPage() {
         <div className="glass-card rounded-xl p-4 mb-4">
           <textarea
             value={prompt}
-            onChange={e => { setPrompt(e.target.value); setSuccess(false) }}
+            onChange={e => { setPrompt(e.target.value); setSuccess(false); setThreat(null) }}
             placeholder="Ex: Crée un pipeline CI/CD pour une application Python FastAPI avec tests pytest, analyse SonarQube, build Docker multi-stage et déploiement Kubernetes..."
             rows={5}
             disabled={loading}
@@ -240,6 +281,38 @@ export default function GeneratorPage() {
             <p className="text-sm text-muted-foreground mb-4">
               Jenkinsfile, Terraform, Dockerfile et Kubernetes manifest sont prêts.
             </p>
+
+            {threat && (
+              <div className="mb-5 rounded-lg border border-border bg-secondary/30 p-4 text-left">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="h-4 w-4 text-primary" />
+                    <span className="text-sm font-semibold">MITRE ATT&CK</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${scoreBadgeClass(threat.score)}`}>
+                      Score {threat.score}/100
+                    </span>
+                    <span className="rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
+                      Risque {threat.riskLevel}
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {threat.techniques.map(technique => (
+                    <div key={technique.id} className="rounded-md border border-border/70 bg-background/40 p-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium">{technique.id} · {technique.name}</span>
+                        <span className={`text-[11px] font-semibold ${techniqueStatusClass(technique.status)}`}>
+                          {technique.status}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-[11px] text-muted-foreground">{technique.description}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {githubUrl && (
               <a

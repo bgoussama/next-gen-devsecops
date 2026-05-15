@@ -32,7 +32,7 @@ RUN groupadd --gid 1001 appgroup && \
 WORKDIR /app
 
 # Copier les dépendances installées depuis le stage builder
-COPY --from=builder /root/.local /home/appuser/.local
+COPY --from=builder --chown=appuser:appgroup /root/.local /home/appuser/.local
 
 # Copier le code de l'application
 COPY --chown=appuser:appgroup . .
@@ -41,8 +41,10 @@ COPY --chown=appuser:appgroup . .
 USER appuser
 
 # [SECURITY] Variables d'environnement de sécurité Python
-ENV PYTHONDONTWRITEBYTECODE=1   # Pas de fichiers .pyc (moins de surface d'attaque)
-ENV PYTHONUNBUFFERED=1          # Logs en temps réel (pas de buffer)
+# Pas de fichiers .pyc (moins de surface d'attaque)
+ENV PYTHONDONTWRITEBYTECODE=1
+# Logs en temps réel (pas de buffer)
+ENV PYTHONUNBUFFERED=1
 ENV PATH=/home/appuser/.local/bin:$PATH
 
 EXPOSE 8000

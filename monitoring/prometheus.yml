@@ -19,10 +19,6 @@ scrape_configs:
       - targets: ['host.docker.internal:8080']
     basic_auth:
       username: 'admin'
-      password: '11752122549e832ebb20b6213efc664e6f'
+      password: '113b2baee3db10326f04aabd9ebd6a88a8'
 
-  # SonarQube — métriques qualité code (optionnel)
-  - job_name: 'sonarqube'
-    static_configs:
-      - targets: ['host.docker.internal:9000']
-    metrics_path: '/api/monitoring/metrics'
+  

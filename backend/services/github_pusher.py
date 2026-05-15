@@ -16,12 +16,30 @@
 #   → retourne l'URL de la branche au frontend
 
 import os
+import re
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from github import Github, GithubException
 
 logger = logging.getLogger(__name__)
+
+
+def _fix_terraform_quotes(terraform_content: str) -> str:
+    lines = terraform_content.split('\n')
+    fixed_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('#') or stripped.startswith('//'):
+            fixed_lines.append(line)
+            continue
+
+        # Remplacer les guillemets simples par des guillemets doubles
+        new_line = re.sub(r"'([^']*)'", r'"\1"', line)
+        fixed_lines.append(new_line)
+
+    return '\n'.join(fixed_lines)
 
 
 @dataclass
@@ -123,7 +141,7 @@ def push_artifacts_to_github(
         repo.create_file(
             path="terraform/main.tf",
             message=commit_message,
-            content=terraform,
+            content=_fix_terraform_quotes(terraform),
             branch=branch_name,
         )
         files_pushed.append("terraform/main.tf")

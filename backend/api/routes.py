@@ -10,7 +10,8 @@
 
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, field_validator
+from dataclasses import asdict
+from pydantic import BaseModel, Field, field_validator
 from typing import Any
 import logging
 
@@ -25,6 +26,7 @@ from services.pipeline_generator import generate_secure_pipeline
 from services.artifact_generator import generate_all_artifacts
 from services.github_pusher import push_artifacts_to_github
 from services.report_store import save_report, get_all_reports
+from services.threat_analyzer import analyze_threats
 from utils.history_manager import save_to_history, get_user_history
 
 logger = logging.getLogger(__name__)
@@ -89,6 +91,18 @@ class ArtifactsResponse(BaseModel):
     error_message: str = ""
     tokens_used: int = 0
     github_branch_url: str = ""   # ← Phase 8 — URL de la branche GitHub
+    threat_score: int = 0
+    threat_risk_level: str = ""
+    threat_techniques: list = Field(default_factory=list)
+    threat_recommendations: list = Field(default_factory=list)
+    threat_summary: str = ""
+
+
+class ThreatAnalysisRequest(BaseModel):
+    jenkinsfile: str = ""
+    terraform: str = ""
+    dockerfile: str = ""
+    k8s_manifest: str = ""
 
 
 class PipelineReportRequest(BaseModel):
@@ -217,7 +231,38 @@ async def generate_pipeline(
 
 
 # ----------------------------------------------------------------
-# ROUTE 3 — POST /api/v1/generate/all
+# ROUTE 3 - POST /api/v1/analyze/threats
+# Analyse MITRE ATT&CK des artefacts fournis
+# ----------------------------------------------------------------
+
+@router.post("/api/v1/analyze/threats", tags=["Threat Intelligence"])
+async def analyze_artifact_threats(
+    request: ThreatAnalysisRequest,
+    token_data: TokenData = Depends(get_current_user),
+):
+    """
+    Analyse les artefacts DevSecOps avec une grille MITRE ATT&CK.
+
+    JWT requis : l'analyse manipule des artefacts potentiellement sensibles.
+    """
+    if not has_permission(token_data.role, "generate_pipeline"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"RÃ´le '{token_data.role.value}' non autorisÃ©.",
+        )
+
+    # Analyse locale : aucun artefact n'est envoye a un service externe.
+    result = analyze_threats(
+        jenkinsfile=request.jenkinsfile,
+        terraform=request.terraform,
+        dockerfile=request.dockerfile,
+        k8s_manifest=request.k8s_manifest,
+    )
+    return asdict(result)
+
+
+# ----------------------------------------------------------------
+# ROUTE 4 — POST /api/v1/generate/all
 # Génère les 4 artefacts + push automatique sur GitHub
 # ----------------------------------------------------------------
 
@@ -308,6 +353,14 @@ async def generate_all(
         error_message=""
     )
 
+    # Threat Intelligence MITRE ATT&CK calculee automatiquement sur les artefacts generes.
+    threat_result = analyze_threats(
+        jenkinsfile=result.jenkinsfile,
+        terraform=result.terraform,
+        dockerfile=result.dockerfile,
+        k8s_manifest=result.k8s_manifest,
+    )
+
     return ArtifactsResponse(
         success=True,
         jenkinsfile=result.jenkinsfile,
@@ -316,6 +369,11 @@ async def generate_all(
         k8s_manifest=result.k8s_manifest,
         tokens_used=result.tokens_used,
         github_branch_url=push_result.branch_url if push_result.success else "",
+        threat_score=threat_result.score,
+        threat_risk_level=threat_result.risk_level,
+        threat_techniques=threat_result.techniques,
+        threat_recommendations=threat_result.recommendations,
+        threat_summary=threat_result.summary,
     )
 
 

@@ -133,6 +133,31 @@ export async function apiGenerateAll(prompt: string) {
 }
 
 // ----------------------------------------------------------------
+// THREAT INTELLIGENCE MITRE ATT&CK
+// Analyse locale cote backend des artefacts deja generes
+// ----------------------------------------------------------------
+
+export async function apiAnalyzeThreats(payload: {
+  jenkinsfile: string
+  terraform: string
+  dockerfile: string
+  k8s_manifest: string
+}) {
+  const response = await authFetch(`${BASE_URL}/api/v1/analyze/threats`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+  const data = await response.json()
+
+  if (!response.ok) {
+    throw new Error(data.detail || 'Erreur lors de l\'analyse MITRE ATT&CK')
+  }
+
+  return data
+}
+
+// ----------------------------------------------------------------
 // HISTORIQUE
 // ----------------------------------------------------------------
 
