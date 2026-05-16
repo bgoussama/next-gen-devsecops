@@ -21,16 +21,16 @@ async function fetchPrometheusMetric(query: string): Promise<string> {
   try {
     const url = `${PROMETHEUS_URL}/api/v1/query?query=${encodeURIComponent(query)}`
     const res = await fetch(url)
-    if (!res.ok) return '0'
+    if (!res.ok) return 'N/A'
     const json = await res.json()
     const result = json?.data?.result
-    if (!result || result.length === 0) return '0'
+    if (!result || result.length === 0) return 'N/A'
     const raw = result[0]?.value?.[1]
-    if (raw === undefined || raw === null) return '0'
+    if (raw === undefined || raw === null) return 'N/A'
     const num = parseFloat(raw)
-    return isNaN(num) ? '0' : num.toFixed(num < 10 ? 2 : 0)
+    return isNaN(num) ? 'N/A' : num.toFixed(num < 10 ? 2 : 0)
   } catch {
-    return '0'
+    return 'N/A'
   }
 }
 
@@ -154,6 +154,7 @@ interface JenkinsReport {
   timestamp: string
   sonarqube_url?: string
   github_branch_url?: string
+  deployed_url?: string
   created_at: string
 }
 
@@ -180,7 +181,7 @@ function KPICard({
 }
 
 function formatReportDate(value: string): string {
-  if (!value) return ''
+  if (!value) return 'N/A'
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('fr-FR')
 }
@@ -198,7 +199,7 @@ function yesNo(value?: boolean): string {
   return value ? 'Oui' : 'Non'
 }
 
-function markdownValue(value: unknown, fallback = ''): string {
+function markdownValue(value: unknown, fallback = 'N/A'): string {
   if (value === undefined || value === null || value === '') return fallback
   return String(value)
 }
@@ -227,7 +228,7 @@ function readableRecommendations(items?: string[]): string[] {
 function generateSecurityReport(report: JenkinsReport): string {
   const durationSeconds = Number.isFinite(report.duration_ms)
     ? (report.duration_ms / 1000).toFixed(1)
-    : 'Aucune sévérité collectée'
+    : 'N/A'
   const recommendations = [
     'Examiner les résultats SonarQube afin d’identifier les problèmes de qualité et de sécurité du code.',
     'Corriger en priorité les vulnérabilités critiques ou élevées détectées dans le code source.',
@@ -238,7 +239,7 @@ function generateSecurityReport(report: JenkinsReport): string {
   ].map(item => `- ${item}`).join('\n')
   const severities = report.cve_scan?.severity_checked?.length
     ? report.cve_scan.severity_checked.join(', ')
-    : 'Aucune sévérité collectée'
+    : 'N/A'
   const executiveSummary = cleanSecurityReportText(report.security_report) ||
     'Le pipeline DevSecOps a ete execute. Jenkins a valide les artefacts generes, execute l’analyse statique avec SonarQube, construit l’image Docker, puis lance un scan de vulnerabilites avec Trivy.'
   const sastDetails = report.sast as (SecurityToolReport & Record<string, unknown>) | undefined
@@ -402,10 +403,10 @@ export default function MonitoringPage() {
 
   // Métriques Prometheus instantanées (KPI cards)
   const [promMetrics, setPromMetrics] = useState({
-    requestsTotal:   '0',
-    requestsPerMin:  '0',
-    avgResponseTime: '0',
-    pipelinesTotal:  '0',
+    requestsTotal:   'N/A',
+    requestsPerMin:  'N/A',
+    avgResponseTime: 'N/A',
+    pipelinesTotal:  'N/A',
   })
 
   // Données des graphiques — initialement vides, remplies depuis Prometheus
@@ -529,7 +530,7 @@ export default function MonitoringPage() {
 
   useEffect(() => {
     // Charger les métriques depuis l'historique réel du backend
-    apiGetHistory()
+    Promise.resolve({ pipelines: [] })
       .then(({ pipelines }: { pipelines: { tokens_used?: number; status: string }[] }) => {
         const total   = pipelines.length
         const tokens  = pipelines.reduce((acc, p) => acc + (p.tokens_used ?? 0), 0)
@@ -543,17 +544,13 @@ export default function MonitoringPage() {
       })
       .catch(() => {})
 
-    loadAllMetrics()
     loadJenkinsReports()
 
     // Rafraîchissement automatique toutes les 30 secondes
     // Identique au comportement de Grafana (scrape_interval: 15s → UI refresh: 30s)
-    const interval = setInterval(() => {
-      loadAllMetrics()
-      loadJenkinsReports()
-    }, 30_000)
+    const interval = setInterval(loadJenkinsReports, 30_000)
     return () => clearInterval(interval)
-  }, [loadAllMetrics, loadJenkinsReports])
+  }, [loadJenkinsReports])
 
   // Formatter pour le tooltip Latence
   const latencyFormatter = (val: number) => [`${val.toFixed(2)} ms`, 'Latence']
@@ -566,7 +563,7 @@ export default function MonitoringPage() {
 
         {/* ─── En-tête ─────────────────────────────────────────────────────── */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
-          <div className="flex items-center gap-3">
+          <div className="hidden items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
               <Activity className="h-5 w-5 text-primary" />
             </div>
@@ -576,7 +573,7 @@ export default function MonitoringPage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="hidden items-center gap-3">
             <button
               onClick={loadAllMetrics}
               disabled={isRefreshing}
@@ -589,7 +586,7 @@ export default function MonitoringPage() {
         </div>
 
         {/* ─── KPI Cards Prometheus ─────────────────────────────────────────── */}
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+        <div className="hidden gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
           <KPICard
             icon={Activity}
             label="Requêtes totales"
@@ -606,7 +603,7 @@ export default function MonitoringPage() {
           <KPICard
             icon={Clock}
             label="Temps de réponse moyen"
-            value={`${promMetrics.avgResponseTime}s`}
+            value={promMetrics.avgResponseTime === 'N/A' ? 'N/A' : `${promMetrics.avgResponseTime}s`}
             sub="Latence moyenne (5 min)"
           />
           <KPICard
@@ -618,7 +615,7 @@ export default function MonitoringPage() {
         </div>
 
         {/* ─── KPI Cards historique backend ────────────────────────────────── */}
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
+        <div className="hidden gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
           <KPICard
             icon={GitBranch}
             label="Générations (historique)"
@@ -633,9 +630,9 @@ export default function MonitoringPage() {
           />
           <KPICard
             icon={CheckCircle}
-            label="Taux de succès"
-            value={`${metrics.successRate}%`}
-            sub="Générations réussies"
+            label="Taux de succès Jenkins"
+            value={`${totalReports > 0 ? Math.round((successfulBuilds / totalReports) * 100) : 100}%`}
+            sub={totalReports > 0 ? `${successfulBuilds}/${totalReports} builds réussis` : 'Aucun build encore'}
           />
           <KPICard
             icon={Clock}
@@ -646,7 +643,7 @@ export default function MonitoringPage() {
         </div>
 
         {/* ─── Graphiques ──────────────────────────────────────────────────── */}
-        <div className="grid gap-6 lg:grid-cols-2 mb-8">
+        <div className="hidden gap-6 lg:grid-cols-2 mb-8">
 
           {/* Bar chart — déploiements 7 jours depuis Prometheus */}
           <div className="glass-card rounded-xl p-5">
@@ -659,7 +656,7 @@ export default function MonitoringPage() {
             </p>
             {deploymentsData.length === 0 ? (
               <div className="flex items-center justify-center h-[220px] text-xs text-muted-foreground/50">
-                Aucune donnée disponible
+                Pas encore de données — générez un pipeline pour alimenter le graphique
               </div>
             ) : (
               <ResponsiveContainer width="100%" height={220}>
@@ -705,7 +702,7 @@ export default function MonitoringPage() {
             </p>
             {latencyData.length === 0 ? (
               <div className="flex items-center justify-center h-[220px] text-xs text-muted-foreground/50">
-                Aucune donnée disponible
+                En attente de données — Prometheus scrape toutes les 15s
               </div>
             ) : (
               <ResponsiveContainer width="100%" height={220}>
@@ -750,6 +747,49 @@ export default function MonitoringPage() {
         </div>
 
 {/* ─── Rapports Jenkins ─────────────────────────────────────────────── */}
+        <section className="mb-8">
+          <div className="mb-4 flex items-center gap-2">
+            <Activity className="h-4 w-4 text-primary" />
+            <h2 className="text-sm font-semibold">Tableau de bord des pipelines</h2>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 mb-6">
+            <div className="glass-card rounded-xl p-4"><p className="text-xs text-muted-foreground">Total des rapports Jenkins</p><p className="mt-2 text-2xl font-bold">{totalReports}</p></div>
+            <div className="glass-card rounded-xl p-4"><p className="text-xs text-muted-foreground">Builds réussis</p><p className="mt-2 text-2xl font-bold text-success">{successfulBuilds}</p></div>
+            <div className="glass-card rounded-xl p-4"><p className="text-xs text-muted-foreground">Builds échoués</p><p className="mt-2 text-2xl font-bold text-destructive">{failedBuilds}</p></div>
+            <div className="glass-card rounded-xl p-4"><p className="text-xs text-muted-foreground">Taux de succès</p><p className="mt-2 text-2xl font-bold">{successRateFromReports}%</p></div>
+            <div className="glass-card rounded-xl p-4"><p className="text-xs text-muted-foreground">Durée moyenne d’exécution</p><p className="mt-2 text-2xl font-bold">{averageDurationSeconds}s</p></div>
+            <div className="glass-card rounded-xl p-4"><p className="text-xs text-muted-foreground">Niveau de risque dominant</p><p className="mt-2 text-2xl font-bold">{dominantRisk}</p></div>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-3">
+            <div className="glass-card rounded-xl p-5">
+              <h3 className="mb-4 text-sm font-semibold">Résultats des pipelines</h3>
+              {totalReports === 0 ? <div className="flex h-[220px] items-center justify-center text-xs text-muted-foreground/60">Aucun rapport Jenkins disponible pour alimenter le graphique.</div> : (
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={pipelineResultsData}><CartesianGrid strokeDasharray="3 3" stroke="oklch(0.25 0.02 260)" /><XAxis dataKey="name" tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }} axisLine={false} tickLine={false} /><YAxis tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }} axisLine={false} tickLine={false} allowDecimals={false} /><Tooltip contentStyle={{ background: 'oklch(0.16 0.02 260)', border: '1px solid oklch(0.25 0.02 260)', borderRadius: 8, fontSize: 12 }} /><Legend wrapperStyle={{ fontSize: 11 }} /><Bar dataKey="success" name="Succès" fill="oklch(0.72 0.19 150)" radius={[4, 4, 0, 0]} /><Bar dataKey="failed" name="Échecs" fill="oklch(0.60 0.22 25)" radius={[4, 4, 0, 0]} /></BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+            <div className="glass-card rounded-xl p-5">
+              <h3 className="mb-4 text-sm font-semibold">Déploiements cette semaine</h3>
+              {deploymentsChartData.length === 0 ? <div className="flex h-[220px] items-center justify-center text-xs text-muted-foreground/60">Aucun rapport Jenkins disponible pour alimenter le graphique.</div> : (
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={deploymentsChartData}><CartesianGrid strokeDasharray="3 3" stroke="oklch(0.25 0.02 260)" /><XAxis dataKey="date" tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }} axisLine={false} tickLine={false} /><YAxis tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }} axisLine={false} tickLine={false} allowDecimals={false} /><Tooltip contentStyle={{ background: 'oklch(0.16 0.02 260)', border: '1px solid oklch(0.25 0.02 260)', borderRadius: 8, fontSize: 12 }} /><Legend wrapperStyle={{ fontSize: 11 }} /><Bar dataKey="success" name="Succès" fill="oklch(0.72 0.19 150)" radius={[4, 4, 0, 0]} /><Bar dataKey="failed" name="Échecs" fill="oklch(0.60 0.22 25)" radius={[4, 4, 0, 0]} /></BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+            <div className="glass-card rounded-xl p-5">
+              <h3 className="mb-4 text-sm font-semibold">Répartition des risques</h3>
+              {riskDistributionData.length === 0 ? <div className="flex h-[220px] items-center justify-center text-xs text-muted-foreground/60">Aucun rapport Jenkins disponible pour alimenter le graphique.</div> : (
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={riskDistributionData}><CartesianGrid strokeDasharray="3 3" stroke="oklch(0.25 0.02 260)" /><XAxis dataKey="risk" tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }} axisLine={false} tickLine={false} /><YAxis tick={{ fill: 'oklch(0.60 0.02 260)', fontSize: 12 }} axisLine={false} tickLine={false} allowDecimals={false} /><Tooltip contentStyle={{ background: 'oklch(0.16 0.02 260)', border: '1px solid oklch(0.25 0.02 260)', borderRadius: 8, fontSize: 12 }} /><Bar dataKey="count" name="Rapports" fill="oklch(0.78 0.18 195)" radius={[4, 4, 0, 0]} /></BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          </div>
+        </section>
+
         <div className="glass-card rounded-xl p-5 mt-6">
           <div className="flex items-center gap-2 mb-4">
             <GitBranch className="h-4 w-4 text-primary" />
@@ -801,11 +841,35 @@ export default function MonitoringPage() {
                         ))}
                       </ul>
                     )}
+                    {/* Badge deployed_url — toujours affiché si rapport reçu */}
+                    <div className="mt-3 flex items-center gap-2">
+                      {report.deployed_url && report.deployed_url !== 'N/A' ? (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-success/15 border border-success/30 px-3 py-1 text-xs font-medium text-success">
+                          <span className="h-1.5 w-1.5 rounded-full bg-success" />
+                          App déployée : {report.deployed_url}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-secondary border border-border px-3 py-1 text-xs font-medium text-muted-foreground">
+                          <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground" />
+                          Déploiement local
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${report.status === 'SUCCESS' ? 'bg-success/10 text-success' : 'bg-destructive/10 text-destructive'}`}>
                     {report.status}
                   </span>
-                  <div className="flex gap-2">
+                  <div className="flex gap-2 flex-wrap">
+                    {/* Bouton "Ouvrir l'app" — uniquement si deployed_url présent et valide */}
+                    {report.deployed_url && report.deployed_url !== 'N/A' && (
+                      <a
+                        href={report.deployed_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 rounded border border-success/40 bg-success/10 px-2 py-1 text-xs text-success hover:bg-success/20 transition-colors">
+                        Ouvrir l'app
+                      </a>
+                    )}
                     {report.github_branch_url && (
                       <a href={report.github_branch_url} target="_blank" rel="noreferrer"
                         className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-secondary transition-colors">
@@ -859,7 +923,7 @@ export default function MonitoringPage() {
 
                 <section className="rounded-lg border border-border bg-secondary/30 p-4">
                   <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-primary">Résultats SAST</h4>
-                  <DetailRow label="SAST" value={`${selectedReport.sast?.tool || 'SonarQube'} ${selectedReport.sast?.status || 'EXECUTED'}`} />
+                  <DetailRow label="SAST" value={`${selectedReport.sast?.tool || 'SonarQube'} ${selectedReport.sast?.status || 'N/A'}`} />
                   <p className="mt-3 break-words text-xs leading-relaxed text-muted-foreground">
                     {selectedReport.sast?.summary || 'Aucun résumé SAST disponible.'}
                   </p>
@@ -867,7 +931,7 @@ export default function MonitoringPage() {
 
                 <section className="rounded-lg border border-border bg-secondary/30 p-4">
                   <h4 className="mb-3 text-xs font-semibold uppercase tracking-wide text-primary">Résultats CVE Scan</h4>
-                  <DetailRow label="CVE Scan" value={`${selectedReport.cve_scan?.tool || 'Trivy'} ${selectedReport.cve_scan?.status || 'EXECUTED'}`} />
+                  <DetailRow label="CVE Scan" value={`${selectedReport.cve_scan?.tool || 'Trivy'} ${selectedReport.cve_scan?.status || 'N/A'}`} />
                   <p className="mt-3 break-words text-xs leading-relaxed text-muted-foreground">
                     {selectedReport.cve_scan?.summary || 'Aucun résumé CVE disponible.'}
                   </p>

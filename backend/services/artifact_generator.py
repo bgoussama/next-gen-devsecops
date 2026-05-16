@@ -127,8 +127,33 @@ ABSOLUTE SECURITY RULES:
    }
    stage('Deploy Report') {
        steps {
-           echo 'Pipeline completed successfully'
-           echo 'Report will be sent by backend post-processing'
+           script {
+               def buildStatus = currentBuild.currentResult ?: 'UNKNOWN'
+               def deployedIp = 'N/A'
+               try {
+                   deployedIp = sh(script: '''AWS_DEFAULT_REGION=eu-west-3 aws ec2 describe-instances --filters "Name=tag:Project,Values=PFS-2026" "Name=instance-state-name,Values=running" --query "Reservations[-1].Instances[-1].PublicIpAddress" --output text 2>/dev/null || echo "N/A"''', returnStdout: true).trim()
+               } catch(e) {
+                   deployedIp = 'N/A'
+               }
+               def deployedUrl = (deployedIp != 'N/A' && deployedIp != 'None' && deployedIp != '') ? "http://${deployedIp}:80" : 'N/A'
+               def payload1 = /{"branch": "${env.BRANCH_NAME}", "build_number": "${env.BUILD_NUMBER}", "status": "${buildStatus}", "duration_ms": ${currentBuild.duration}, "deployed_url": "${deployedUrl}"}/
+               sh "curl -s -X POST http://host.docker.internal:8000/api/v1/pipeline/report -H 'Content-Type: application/json' -d '${payload1}' || true"
+               echo "Pipeline status: ${buildStatus} — App: ${deployedUrl}"
+           }
+       }
+   }
+   post {
+       always {
+           script {
+               def buildStatus = currentBuild.currentResult ?: 'UNKNOWN'
+               def deployedIp = 'N/A'
+               try {
+                   deployedIp = sh(script: '''AWS_DEFAULT_REGION=eu-west-3 aws ec2 describe-instances --filters "Name=tag:Project,Values=PFS-2026" "Name=instance-state-name,Values=running" --query "Reservations[-1].Instances[-1].PublicIpAddress" --output text 2>/dev/null || echo "N/A"''', returnStdout: true).trim()
+               } catch(e) {}
+               def deployedUrl = (deployedIp != 'N/A' && deployedIp != 'None' && deployedIp != '') ? "http://${deployedIp}:80" : 'N/A'
+               def payload2 = /{"branch": "${env.BRANCH_NAME}", "build_number": "${env.BUILD_NUMBER}", "status": "${buildStatus}", "duration_ms": ${currentBuild.duration}, "deployed_url": "${deployedUrl}"}/
+               sh "curl -s -X POST http://host.docker.internal:8000/api/v1/pipeline/report -H 'Content-Type: application/json' -d '${payload2}' || true"
+           }
        }
    }
 4. Terraform must include: provider aws, security groups with deny-by-default, monitoring=true
@@ -171,7 +196,7 @@ ABSOLUTE SECURITY RULES:
      systemctl start docker
      systemctl enable docker
      docker pull VAR_docker_image
-     docker run -d -p 80:80 --restart always VAR_docker_image
+     docker run -d -p 80:80 --user root --restart always VAR_docker_image
    - NEVER create circular dependencies between resources
    - Security group must be defined BEFORE aws_instance
    - aws_instance must reference security group using vpc_security_group_ids = [aws_security_group.nextgen-sg.id]
@@ -181,6 +206,8 @@ ABSOLUTE SECURITY RULES:
    - NEVER invent or hardcode VPC IDs like vpc-12345678
    - NEVER specify subnet_id in aws_instance
    - Remove vpc_id attribute completely from aws_security_group resource
+   - Add lifecycle { create_before_destroy = true } to aws_security_group to avoid duplicate name errors
+   - Use name_prefix = "nextgen-sg-" instead of name = "nextgen-sg" in aws_security_group to avoid conflicts
    - Terraform must accept a variable docker_image of type string
    - EC2 user_data must install Docker and run : docker pull VAR_docker_image && docker run -d -p 80:80 VAR_docker_image
    - Add this variable declaration : variable "docker_image" { type = string default = "nginx:latest" }
@@ -528,10 +555,10 @@ def generate_all_artifacts(user_prompt: str) -> ArtifactResult:
             logger.info(f"Artifacts generated | tokens={tokens_used}")
 
             # Remplacer tous les placeholders dans les 4 artefacts
-            jenkinsfile  = _add_deploy_report_stage(_replace_placeholders(data["jenkinsfile"]))
-            terraform    = _replace_placeholders(data["terraform"])
-            dockerfile   = _replace_placeholders(data["dockerfile"])
-            k8s_manifest = _replace_placeholders(data["k8s_manifest"])
+            jenkinsfile  = _add_deploy_report_stage(_replace_placeholders(str(data["jenkinsfile"]) if not isinstance(data["jenkinsfile"], str) else data["jenkinsfile"]))
+            terraform    = _replace_placeholders(str(data["terraform"]) if not isinstance(data["terraform"], str) else data["terraform"])
+            dockerfile   = _replace_placeholders(str(data["dockerfile"]) if not isinstance(data["dockerfile"], str) else data["dockerfile"])
+            k8s_manifest = _replace_placeholders(str(data["k8s_manifest"]) if not isinstance(data["k8s_manifest"], str) else data["k8s_manifest"])
 
             return ArtifactResult(
                 success=True,

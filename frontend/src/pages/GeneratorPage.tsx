@@ -4,9 +4,9 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bot, Sparkles, Loader2, Terminal, ChevronRight, GitBranch, ShieldCheck } from 'lucide-react'
+import { Bot, Sparkles, Loader2, Terminal, ChevronRight, GitBranch, ShieldCheck, Rocket, ExternalLink } from 'lucide-react'
 import { Navbar } from '../components/Navbar'
-import { apiGenerateAll } from '../lib/api'
+import { apiGenerateAll, apiGetPipelineReports } from '../lib/api'
 
 // ─── Templates de prompts rapides ─────────────────────────────────────────────
 const TEMPLATES = [
@@ -64,14 +64,19 @@ function techniqueStatusClass(status: ThreatTechnique['status']) {
 // ─── Composant principal ───────────────────────────────────────────────────────
 export default function GeneratorPage() {
   const navigate = useNavigate()
-  const [prompt, setPrompt]       = useState('')
-  const [loading, setLoading]     = useState(false)
-  const [logs, setLogs]           = useState<LogLine[]>([])
-  const [success, setSuccess]     = useState(false)
-  const [githubUrl, setGithubUrl] = useState('')
-  const [threat, setThreat]       = useState<ThreatSnapshot | null>(null)
-  const logRef = useRef<HTMLDivElement>(null)
-  const logId  = useRef(0)
+  const [prompt, setPrompt]           = useState('')
+  const [loading, setLoading]         = useState(false)
+  const [logs, setLogs]               = useState<LogLine[]>([])
+  const [success, setSuccess]         = useState(false)
+  const [githubUrl, setGithubUrl]     = useState('')
+  const [threat, setThreat]           = useState<ThreatSnapshot | null>(null)
+  // Suivi du pipeline Jenkins après génération
+  const [pipelineRunning, setPipelineRunning] = useState(false)
+  const [deployedUrl, setDeployedUrl]         = useState<string | null>(null)
+  const [generatedBranch, setGeneratedBranch] = useState<string | null>(null)
+  const logRef         = useRef<HTMLDivElement>(null)
+  const logId          = useRef(0)
+  const pollingRef     = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     if (logRef.current) {
@@ -83,6 +88,53 @@ export default function GeneratorPage() {
     setLogs(prev => [...prev, { id: logId.current++, text, type }])
   }
 
+  // Arrêter le polling quand le composant est démonté
+  useEffect(() => {
+    return () => {
+      if (pollingRef.current) clearInterval(pollingRef.current)
+    }
+  }, [])
+
+  // Démarrer le polling toutes les 15s après génération pour détecter le rapport Jenkins
+  const startPolling = (branchUrl: string) => {
+    const branchName = branchUrl.split('/tree/').pop() ?? null
+    setGeneratedBranch(branchName)
+    setPipelineRunning(true)
+
+    if (pollingRef.current) clearInterval(pollingRef.current)
+
+    pollingRef.current = setInterval(async () => {
+      try {
+        const data = await apiGetPipelineReports()
+        const reports: { branch: string; deployed_url?: string; status: string }[] = data.reports ?? []
+        const match = reports.find(r => branchName && r.branch === branchName)
+        if (match) {
+          const failed = match.status === 'FAILURE' || match.status === 'ABORTED' || match.status === 'UNKNOWN'
+          if (failed) {
+            // Pipeline échoué — badge rouge
+            setDeployedUrl('failed')
+          } else if (match.deployed_url && match.deployed_url !== 'N/A' && match.deployed_url !== 'None') {
+            // SUCCESS avec IP publique — badge vert avec URL
+            setDeployedUrl(match.deployed_url)
+          } else {
+            // SUCCESS sans IP — badge vert sans URL
+            setDeployedUrl('success-local')
+          }
+          setPipelineRunning(false)
+          if (pollingRef.current) clearInterval(pollingRef.current)
+        }
+      } catch {
+        // Ignorer les erreurs de polling — réessai au prochain tick
+      }
+    }, 15_000)
+
+    // Arrêter automatiquement après 10 minutes si aucun rapport reçu
+    setTimeout(() => {
+      if (pollingRef.current) clearInterval(pollingRef.current)
+      setPipelineRunning(false)
+    }, 600_000)
+  }
+
   const handleGenerate = async () => {
     if (!prompt.trim()) return
     setLoading(true)
@@ -90,6 +142,10 @@ export default function GeneratorPage() {
     setSuccess(false)
     setGithubUrl('')
     setThreat(null)
+    setDeployedUrl(null)
+    setPipelineRunning(false)
+    setGeneratedBranch(null)
+    if (pollingRef.current) clearInterval(pollingRef.current)
 
     // ── Logs visibles par l'utilisateur — simples et professionnels ──
     // Aucune mention de Groq, des couches de sécurité ou de l'architecture interne
@@ -117,6 +173,9 @@ export default function GeneratorPage() {
       if (data.github_branch_url) {
         addLog('[OK] Fichiers sauvegardés dans le référentiel', 'success')
         setGithubUrl(data.github_branch_url)
+        // Démarrer le polling Jenkins pour détecter le deployed_url
+        startPolling(data.github_branch_url)
+        addLog('[...] Pipeline Jenkins en cours — vérification toutes les 15s...', 'system')
       }
 
       const threatSnapshot: ThreatSnapshot = {
@@ -311,6 +370,72 @@ export default function GeneratorPage() {
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* Indicateur pipeline Jenkins en cours */}
+            {pipelineRunning && !deployedUrl && (
+              <div className="mb-4 rounded-lg border border-primary/20 bg-primary/5 p-4 text-left">
+                <div className="flex items-center gap-2 mb-2">
+                  <Loader2 className="h-4 w-4 text-primary animate-spin" />
+                  <span className="text-sm font-semibold text-primary">Pipeline en cours d'exécution...</span>
+                </div>
+                <p className="text-xs text-muted-foreground mb-3">
+                  Jenkins build, scan, et déploie l'app sur EC2. L'URL sera disponible dans ~2 minutes.
+                </p>
+                {/* Barre de progression indéterminée */}
+                <div className="h-1.5 w-full rounded-full bg-secondary overflow-hidden">
+                  <div className="h-full w-1/3 rounded-full bg-primary animate-[slide_2s_ease-in-out_infinite]" />
+                </div>
+                {generatedBranch && (
+                  <p className="mt-2 text-[11px] text-muted-foreground/60 font-mono truncate">
+                    Branche : {generatedBranch}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* SUCCESS avec IP publique EC2 */}
+            {deployedUrl && deployedUrl !== 'local' && deployedUrl !== 'success-local' && deployedUrl !== 'failed' && (
+              <div className="mb-4 rounded-lg border border-success/30 bg-success/10 p-4 text-left">
+                <div className="flex items-center gap-2 mb-2">
+                  <Rocket className="h-4 w-4 text-success" />
+                  <span className="text-sm font-semibold text-success">App déployée sur EC2 !</span>
+                </div>
+                <p className="text-xs text-muted-foreground mb-3">L'application est accessible à :</p>
+                <a
+                  href={deployedUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 rounded-lg border border-success/40 bg-success/15 px-4 py-2 text-sm font-semibold text-success hover:bg-success/25 transition-colors"
+                >
+                  <ExternalLink className="h-4 w-4" />
+                  Ouvrir l'app — {deployedUrl}
+                </a>
+              </div>
+            )}
+            {/* SUCCESS sans IP publique */}
+            {deployedUrl === 'success-local' && (
+              <div className="mb-4 rounded-lg border border-success/30 bg-success/10 p-4 text-left">
+                <div className="flex items-center gap-2">
+                  <Rocket className="h-4 w-4 text-success" />
+                  <span className="text-sm font-semibold text-success">Pipeline terminé avec succès</span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Aucune IP publique détectée — l'app tourne en local ou sur un réseau privé.
+                </p>
+              </div>
+            )}
+            {/* FAILURE / ABORTED */}
+            {deployedUrl === 'failed' && (
+              <div className="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-left">
+                <div className="flex items-center gap-2">
+                  <Rocket className="h-4 w-4 text-destructive" />
+                  <span className="text-sm font-semibold text-destructive">Pipeline échoué — Vérifier Jenkins</span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Un ou plusieurs stages ont échoué. Consultez les logs Jenkins pour plus de détails.
+                </p>
               </div>
             )}
 

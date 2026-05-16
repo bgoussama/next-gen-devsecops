@@ -113,6 +113,7 @@ class PipelineReportRequest(BaseModel):
     timestamp: str | None = None
     sonarqube_url: str | None = None
     github_branch_url: str | None = None
+    deployed_url: str | None = None  # URL EC2 apres terraform output
 
     @field_validator("status")
     @classmethod

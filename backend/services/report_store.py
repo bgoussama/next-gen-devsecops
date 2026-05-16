@@ -92,6 +92,11 @@ def save_report(report_data: dict) -> dict:
     if report_data.get("github_branch_url"):
         report["github_branch_url"] = report_data["github_branch_url"]
 
+    # URL de l'app deployee sur EC2 — envoyee par Jenkins apres terraform output
+    deployed_url = report_data.get("deployed_url")
+    if deployed_url and deployed_url != "N/A":
+        report["deployed_url"] = deployed_url
+
     _REPORTS.append(report)
     return report
 
