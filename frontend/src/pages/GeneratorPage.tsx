@@ -71,9 +71,18 @@ export default function GeneratorPage() {
   const [githubUrl, setGithubUrl]     = useState('')
   const [threat, setThreat]           = useState<ThreatSnapshot | null>(null)
   // Suivi du pipeline Jenkins après génération
-  const [pipelineRunning, setPipelineRunning] = useState(false)
-  const [deployedUrl, setDeployedUrl]         = useState<string | null>(null)
-  const [generatedBranch, setGeneratedBranch] = useState<string | null>(null)
+  const [pipelineRunning, setPipelineRunning] = useState(() =>
+    localStorage.getItem('nextgen_pipeline_running') === 'true'
+  )
+  const [deployedUrl, setDeployedUrl]         = useState<string | null>(() =>
+    localStorage.getItem('nextgen_deployed_url')
+  )
+  const [generatedBranch, setGeneratedBranch] = useState<string | null>(() =>
+    localStorage.getItem('nextgen_generated_branch')
+  )
+  const [pipelineStatus, setPipelineStatus]   = useState<string | null>(() =>
+    localStorage.getItem('nextgen_pipeline_status')
+  )
   const logRef         = useRef<HTMLDivElement>(null)
   const logId          = useRef(0)
   const pollingRef     = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -100,8 +109,22 @@ export default function GeneratorPage() {
     const branchName = branchUrl.split('/tree/').pop() ?? null
     setGeneratedBranch(branchName)
     setPipelineRunning(true)
+    setPipelineStatus('running')
+    localStorage.setItem('nextgen_pipeline_running', 'true')
+    localStorage.setItem('nextgen_generated_branch', branchName ?? '')
+    localStorage.setItem('nextgen_pipeline_status', 'running')
 
     if (pollingRef.current) clearInterval(pollingRef.current)
+
+    const finishPolling = (url: string, status: string) => {
+      setDeployedUrl(url)
+      setPipelineRunning(false)
+      setPipelineStatus(status)
+      localStorage.setItem('nextgen_deployed_url', url)
+      localStorage.setItem('nextgen_pipeline_running', 'false')
+      localStorage.setItem('nextgen_pipeline_status', status)
+      if (pollingRef.current) clearInterval(pollingRef.current)
+    }
 
     pollingRef.current = setInterval(async () => {
       try {
@@ -111,17 +134,12 @@ export default function GeneratorPage() {
         if (match) {
           const failed = match.status === 'FAILURE' || match.status === 'ABORTED' || match.status === 'UNKNOWN'
           if (failed) {
-            // Pipeline échoué — badge rouge
-            setDeployedUrl('failed')
+            finishPolling('failed', 'failure')
           } else if (match.deployed_url && match.deployed_url !== 'N/A' && match.deployed_url !== 'None') {
-            // SUCCESS avec IP publique — badge vert avec URL
-            setDeployedUrl(match.deployed_url)
+            finishPolling(match.deployed_url, 'success')
           } else {
-            // SUCCESS sans IP — badge vert sans URL
-            setDeployedUrl('success-local')
+            finishPolling('success-local', 'success')
           }
-          setPipelineRunning(false)
-          if (pollingRef.current) clearInterval(pollingRef.current)
         }
       } catch {
         // Ignorer les erreurs de polling — réessai au prochain tick
@@ -132,6 +150,7 @@ export default function GeneratorPage() {
     setTimeout(() => {
       if (pollingRef.current) clearInterval(pollingRef.current)
       setPipelineRunning(false)
+      localStorage.setItem('nextgen_pipeline_running', 'false')
     }, 600_000)
   }
 
@@ -144,7 +163,12 @@ export default function GeneratorPage() {
     setThreat(null)
     setDeployedUrl(null)
     setPipelineRunning(false)
+    setPipelineStatus(null)
     setGeneratedBranch(null)
+    localStorage.removeItem('nextgen_pipeline_running')
+    localStorage.removeItem('nextgen_deployed_url')
+    localStorage.removeItem('nextgen_generated_branch')
+    localStorage.removeItem('nextgen_pipeline_status')
     if (pollingRef.current) clearInterval(pollingRef.current)
 
     // ── Logs visibles par l'utilisateur — simples et professionnels ──

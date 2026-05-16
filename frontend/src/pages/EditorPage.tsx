@@ -294,12 +294,14 @@ export default function EditorPage() {
   const raw = localStorage.getItem('lastGeneration')
   const data: GenerationData | null = raw ? JSON.parse(raw) : null
 
+  const unescape = (s: string) => s.replace(/\\n/g, '\n')
+
   // Construction de la map — champs nouveaux en priorité, fallback sur pipeline_content
   const codeMap: Record<TabKey, string> = {
-    jenkinsfile: data?.jenkinsfile || data?.pipeline_content || '',
-    terraform:   data?.terraform   || PLACEHOLDER.terraform,
-    dockerfile:  data?.dockerfile  || PLACEHOLDER.dockerfile,
-    kubernetes:  data?.k8s_manifest || PLACEHOLDER.kubernetes,
+    jenkinsfile: unescape(data?.jenkinsfile || data?.pipeline_content || ''),
+    terraform:   unescape(data?.terraform   || PLACEHOLDER.terraform),
+    dockerfile:  unescape(data?.dockerfile  || PLACEHOLDER.dockerfile),
+    kubernetes:  unescape(data?.k8s_manifest || PLACEHOLDER.kubernetes),
     threat:      data ? buildThreatReport(data) : '',
   }
 
